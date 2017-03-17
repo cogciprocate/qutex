@@ -6,7 +6,10 @@ license = "MIT"
 description = """\
 	Synchronization mechanisms that rely on lock-free queues to guarantee \
 	mutually exclusive or shared exclusive access to data."""
-
+homepage = "https://github.com/cogciprocate/qutex"
+repository = "https://github.com/cogciprocate/qutex"
+readme = "README.md"
+keywords = ["futures", "mutex", "lock"]
 
 [dependencies]
 crossbeam = "0.2"

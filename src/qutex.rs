@@ -35,7 +35,7 @@ impl<T> DerefMut for Guard<T> {
 
 impl<T> Drop for Guard<T> {
     fn drop(&mut self) {
-        unsafe { self.lock.unlock() };
+        unsafe { self.lock.unlock().expect("Error dropping Guard") };
     }
 }
 
@@ -65,7 +65,8 @@ impl<T> Future for FutureGuard<T> {
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
-            unsafe { self.lock.as_ref().unwrap().process_queue(); }
+            unsafe { self.lock.as_ref().unwrap().process_queue()
+                .expect("Error polling FutureGuard"); }
 
             match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| {
@@ -182,24 +183,26 @@ impl<T> Qutex<T> {
 
     /// Pops the next lock request in the queue if this lock is unlocked.
     //
-    // TODO: Determine if this needs to be unsafe.
-    //  * This is currently public/unsafe due to 'derivers' (aka. sub-types).
-    //  * Consider removing unsafe qualifier.
-    //    - If this imposes a performance burden, create a 'safe' version with
+    // TODO: 
+    // * Determine if this needs to be unsafe.
+    // * This is currently public/unsafe due to 'derivers' (aka. sub-types).
+    // * Consider removing unsafe qualifier.
+    //   - If this imposes a performance burden, create a 'safe' version with
     //      necessary runtime checks
-    //
-    pub unsafe fn process_queue(&self) {
+    // * Return proper error type
+    pub unsafe fn process_queue(&self) -> Result<(), &'static str> {
         match self.inner.state.compare_and_swap(0, 1, SeqCst) {
             // Unlocked:
             0 => {
                 if let Some(req) = self.inner.queue.try_pop() {
-                    req.tx.complete(());
+                    req.tx.send(()).map_err(|_| "Qutex queue has been dropped")
                 } else {
                     self.inner.state.store(0, SeqCst);
+                    Ok(())
                 }
             },
             // Already locked, leave it alone:
-            1 => (),
+            1 => Ok(()),
             // Something else:
             n => panic!("Qutex::process_queue: inner.state: {}.", n),
         }
@@ -207,11 +210,13 @@ impl<T> Qutex<T> {
 
     /// Unlocks this lock and wakes up the next task in the queue.
     //
-    // TODO: Evaluate unsafeness.
-    pub unsafe fn unlock(&self) {
+    // TODO: 
+    // * Evaluate unsafeness.
+    // * Return proper error type
+    pub unsafe fn unlock(&self) -> Result<(), &'static str> {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
-        self.process_queue();
+        self.process_queue()
     }
 }
 
