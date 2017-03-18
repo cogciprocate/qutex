@@ -133,19 +133,19 @@ impl<T> Qutex<T> {
 
     /// Returns a new `FutureGuard` which can be used as a future and will
     /// resolve into a `Guard`.
-    pub fn lock(&self) -> FutureGuard<T> {
+    pub fn lock(self) -> FutureGuard<T> {
         let (tx, rx) = oneshot::channel();
         // self.inner.queue.push(Request { tx: tx, wait_event: None });
         // self.inner.queue.push(Request { tx: tx });
         unsafe { self.push_request(Request::new(tx)); }
         // FutureGuard { lock: Some((*self).clone()), rx: rx }
-        FutureGuard::new((*self).clone(), rx)
+        FutureGuard::new(self, rx)
     }
 
     /// Pushes a lock request onto the queue.
     ///
     //
-    // TODO: Evaluate unsafeness.
+    // TODO: Evaluate unsafe-ness.
     //
     #[inline]
     pub unsafe fn push_request(&self, req: Request) {
@@ -187,9 +187,7 @@ impl<T> Qutex<T> {
     // * Determine if this needs to be unsafe.
     // * This is currently public/unsafe due to 'derivers' (aka. sub-types).
     // * Consider removing unsafe qualifier.
-    //   - If this imposes a performance burden, create a 'safe' version with
-    //      necessary runtime checks
-    // * Return proper error type
+    // * Return proper error type.
     pub unsafe fn process_queue(&self) -> Result<(), &'static str> {
         match self.inner.state.compare_and_swap(0, 1, SeqCst) {
             // Unlocked:
@@ -211,7 +209,7 @@ impl<T> Qutex<T> {
     /// Unlocks this lock and wakes up the next task in the queue.
     //
     // TODO: 
-    // * Evaluate unsafeness.
+    // * Evaluate unsafe-ness.
     // * Return proper error type
     pub unsafe fn unlock(&self) -> Result<(), &'static str> {
         // TODO: Consider using `Ordering::Release`.
@@ -249,21 +247,21 @@ mod tests {
 
         println!("Reading val...");
         {
-            let future_guard = val.lock();
+            let future_guard = val.clone().lock();
             let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
 
         println!("Storing new val...");
         {
-            let future_guard = val.lock();
+            let future_guard = val.clone().lock();
             let mut guard = future_guard.wait().unwrap();
             *guard = 5;
         }
 
         println!("Reading val...");
         {
-            let future_guard = val.lock();
+            let future_guard = val.clone().lock();
             let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
@@ -274,9 +272,9 @@ mod tests {
     fn concurrent() {
         let val = Qutex::from(10000i32);
 
-        let fg0 = val.lock();
-        let fg1 = val.lock();
-        let fg2 = val.lock();
+        let fg0 = val.clone().lock();
+        let fg1 = val.clone().lock();
+        let fg2 = val.clone().lock();
 
         println!("Reading val 0...");
         {
