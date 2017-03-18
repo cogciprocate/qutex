@@ -4,7 +4,8 @@ version = "0.0.2"
 authors = ["Nick Sanders <cogciprocate@gmail.com>"]
 license = "MIT"
 description = """\
-	Synchronization mechanisms that rely on lock-free queues to guarantee \
+	Synchronization mechanisms that rely on lock-free and other \
+	non-(thread)blocking techniques, such as Rust futures, to guarantee \
 	mutually exclusive or shared exclusive access to data."""
 documentation = "https://docs.rs/qutex"
 homepage = "https://github.com/cogciprocate/qutex"

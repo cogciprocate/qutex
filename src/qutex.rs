@@ -40,12 +40,14 @@ impl<T> Drop for Guard<T> {
 }
 
 
+/// A future which resolves to a `Guard`.
 pub struct FutureGuard<T> {
     lock: Option<Qutex<T>>,
     rx: oneshot::Receiver<()>,
 }
 
 impl<T> FutureGuard<T> {
+    /// Returns a new `FutureGuard`.
     fn new(lock: Qutex<T>, rx: oneshot::Receiver<()>) -> FutureGuard<T> {
         FutureGuard {
             lock: Some(lock),
@@ -53,6 +55,8 @@ impl<T> FutureGuard<T> {
         }
     }
 
+    /// Blocks the current thread until this future resolves.
+    #[inline]
     pub fn wait(self) -> Result<Guard<T>, Canceled> {
         <Self as Future>::wait(self)
     }
@@ -83,13 +87,15 @@ impl<T> Future for FutureGuard<T> {
 }
 
 
+/// A request to lock the qutex for exclusive access.
 pub struct Request {
     tx: oneshot::Sender<()>,
     // wait_event: Option<Event>,
 }
 
 impl Request {
-    pub fn new(tx: oneshot::Sender<()>) -> Request {
+    /// Returns a new `Request`.
+    fn new(tx: oneshot::Sender<()>) -> Request {
         Request { tx: tx }
     }
 }
@@ -117,7 +123,7 @@ unsafe impl<T: Send> Send for Inner<T> {}
 unsafe impl<T: Send> Sync for Inner<T> {}
 
 
-/// A queue-backed exclusive data lock.
+/// A lock-free-queue-backed exclusive data lock.
 pub struct Qutex<T> {
     inner: Arc<Inner<T>>,
 }
@@ -135,10 +141,7 @@ impl<T> Qutex<T> {
     /// resolve into a `Guard`.
     pub fn lock(self) -> FutureGuard<T> {
         let (tx, rx) = oneshot::channel();
-        // self.inner.queue.push(Request { tx: tx, wait_event: None });
-        // self.inner.queue.push(Request { tx: tx });
         unsafe { self.push_request(Request::new(tx)); }
-        // FutureGuard { lock: Some((*self).clone()), rx: rx }
         FutureGuard::new(self, rx)
     }
 
@@ -184,10 +187,10 @@ impl<T> Qutex<T> {
     /// Pops the next lock request in the queue if this lock is unlocked.
     //
     // TODO: 
-    // * Determine if this needs to be unsafe.
-    // * This is currently public/unsafe due to 'derivers' (aka. sub-types).
+    // * This is currently public due to 'derivers' (aka. sub-types). Evaluate.
     // * Consider removing unsafe qualifier.
     // * Return proper error type.
+    //
     pub unsafe fn process_queue(&self) -> Result<(), &'static str> {
         match self.inner.state.compare_and_swap(0, 1, SeqCst) {
             // Unlocked:
@@ -266,9 +269,11 @@ mod tests {
             println!("val: {}", *guard);
         }
     }
-
+    
+    // FIXME: INCOMPLETE: Actually make this concurrent with a loop and some
+    // spawned threads.
+    //
     #[test]
-    // TODO: INCOMPLETE: Actually make this concurrent.
     fn concurrent() {
         let val = Qutex::from(10000i32);
 
