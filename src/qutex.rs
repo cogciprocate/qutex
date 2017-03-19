@@ -19,6 +19,17 @@ pub struct Guard<T> {
     lock: Qutex<T>,
 }
 
+impl<T> Guard<T> {
+    /// Releases the lock held by this `Guard` and returns the original `Qutex`.
+    //
+    // NOTE: This increments the `Qutex` reference count before immediately
+    // decrementing it. Is it worth avoiding this with unsafe hackery? It
+    // would make uglier code for the measly savings of two atomic writes...
+    pub fn unlock(self) -> Qutex<T> {
+        self.lock.clone()
+    }
+}
+
 impl<T> Deref for Guard<T> {
     type Target = T;
 
