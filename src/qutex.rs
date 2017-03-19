@@ -107,7 +107,7 @@ pub struct Request {
 
 impl Request {
     /// Returns a new `Request`.
-    fn new(tx: oneshot::Sender<()>) -> Request {
+    pub fn new(tx: oneshot::Sender<()>) -> Request {
         Request { tx: tx }
     }
 }
