@@ -16,7 +16,7 @@ use crossbeam::sync::SegQueue;
 
  // Allows access to the data contained within a lock just like a mutex guard.
 pub struct Guard<T> {
-    lock: Qutex<T>,
+    qutex: Qutex<T>,
 }
 
 impl<T> Guard<T> {
@@ -27,7 +27,7 @@ impl<T> Guard<T> {
     // or using unsafe hackery? It would make uglier code for the measly
     // savings of two atomic stores...
     pub fn unlock(self) -> Qutex<T> {
-        self.lock.clone()
+        self.qutex.clone()
     }
 }
 
@@ -35,34 +35,34 @@ impl<T> Deref for Guard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.lock.inner.cell.get() }
+        unsafe { &*self.qutex.inner.cell.get() }
     }
 }
 
 impl<T> DerefMut for Guard<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.lock.inner.cell.get() }
+        unsafe { &mut *self.qutex.inner.cell.get() }
     }
 }
 
 impl<T> Drop for Guard<T> {
     fn drop(&mut self) {
-        unsafe { self.lock.unlock().expect("Error dropping Guard") };
+        unsafe { self.qutex.direct_unlock().expect("Error dropping Guard") };
     }
 }
 
 
 /// A future which resolves to a `Guard`.
 pub struct FutureGuard<T> {
-    lock: Option<Qutex<T>>,
+    qutex: Option<Qutex<T>>,
     rx: oneshot::Receiver<()>,
 }
 
 impl<T> FutureGuard<T> {
     /// Returns a new `FutureGuard`.
-    fn new(lock: Qutex<T>, rx: oneshot::Receiver<()>) -> FutureGuard<T> {
+    fn new(qutex: Qutex<T>, rx: oneshot::Receiver<()>) -> FutureGuard<T> {
         FutureGuard {
-            lock: Some(lock),
+            qutex: Some(qutex),
             rx: rx,
         }
     }
@@ -80,13 +80,13 @@ impl<T> Future for FutureGuard<T> {
 
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if self.lock.is_some() {
-            unsafe { self.lock.as_ref().unwrap().process_queue()
+        if self.qutex.is_some() {
+            unsafe { self.qutex.as_ref().unwrap().process_queue()
                 .expect("Error polling FutureGuard"); }
 
             match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| {
-                    Guard { lock: self.lock.take().unwrap() }
+                    Guard { qutex: self.qutex.take().unwrap() }
                 })),
                 Err(e) => Err(e.into()),
             }
@@ -226,7 +226,7 @@ impl<T> Qutex<T> {
     // TODO: 
     // * Evaluate unsafe-ness.
     // * Return proper error type
-    pub unsafe fn unlock(&self) -> Result<(), &'static str> {
+    pub unsafe fn direct_unlock(&self) -> Result<(), &'static str> {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
         self.process_queue()
