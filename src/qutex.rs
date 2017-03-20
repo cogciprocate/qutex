@@ -25,7 +25,7 @@ impl<T> Guard<T> {
     // NOTE: This increments the `Qutex` reference count before immediately
     // decrementing it. Is it worth avoiding this by wrapping it in an Option
     // or using unsafe hackery? It would make uglier code for the measly
-    // savings of two atomic writes...
+    // savings of two atomic stores...
     pub fn unlock(self) -> Qutex<T> {
         self.lock.clone()
     }
@@ -151,7 +151,7 @@ impl<T> Qutex<T> {
 
     /// Returns a new `FutureGuard` which can be used as a future and will
     /// resolve into a `Guard`.
-    pub fn lock(self) -> FutureGuard<T> {
+    pub fn request_lock(self) -> FutureGuard<T> {
         let (tx, rx) = oneshot::channel();
         unsafe { self.push_request(Request::new(tx)); }
         FutureGuard::new(self, rx)
@@ -263,53 +263,49 @@ mod tests {
 
         println!("Reading val...");
         {
-            let future_guard = val.clone().lock();
+            let future_guard = val.clone().request_lock();
             let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
 
         println!("Storing new val...");
         {
-            let future_guard = val.clone().lock();
+            let future_guard = val.clone().request_lock();
             let mut guard = future_guard.wait().unwrap();
             *guard = 5;
         }
 
         println!("Reading val...");
         {
-            let future_guard = val.clone().lock();
+            let future_guard = val.clone().request_lock();
             let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
     }
     
-    // FIXME: INCOMPLETE: Actually make this concurrent with a loop and some
-    // spawned threads.
-    //
     #[test]
     fn concurrent() {
-        let val = Qutex::from(10000i32);
+        use std::thread;
 
-        let fg0 = val.clone().lock();
-        let fg1 = val.clone().lock();
-        let fg2 = val.clone().lock();
+        let start_val = 10000i32;
+        let thread_count = 50;
+        let qutex = Qutex::new(start_val);
+        let mut threads = Vec::with_capacity(thread_count);
 
-        println!("Reading val 0...");
-        {
-            let guard = fg0.wait().unwrap();
-            println!("val: {}", *guard);
+        for i in 0..thread_count {
+            let future_guard = qutex.clone().request_lock();
+
+            threads.push(thread::spawn(|| {
+                let mut guard = future_guard.wait().unwrap();
+                *guard += 1
+            }))            
         }
 
-        println!("Reading val 1...");
-        {
-            let guard = fg1.wait().unwrap();
-            println!("val: {}", *guard);
+        for thread in threads {
+            thread.join().unwrap();
         }
 
-        println!("Reading val 2...");
-        {
-            let guard = fg2.wait().unwrap();
-            println!("val: {}", *guard);
-        }
+        let guard = qutex.clone().request_lock().wait().unwrap();
+        assert!(*guard == start_val + thread_count as i32);
     }
 }
