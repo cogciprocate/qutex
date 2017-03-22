@@ -100,6 +100,7 @@ impl<T> Future for FutureGuard<T> {
 
 
 /// A request to lock the qutex for exclusive access.
+#[derive(Debug)]
 pub struct Request {
     tx: oneshot::Sender<()>,
     // wait_event: Option<Event>,
@@ -208,8 +209,10 @@ impl<T> Qutex<T> {
             // Unlocked:
             0 => {
                 if let Some(req) = self.inner.queue.try_pop() {
+                    // println!("Qutex::process_queue: Fulfilling lock request.");
                     req.tx.send(()).map_err(|_| "Qutex queue has been dropped")
                 } else {
+                    // println!("Qutex::process_queue: Queue is empty.");
                     self.inner.state.store(0, SeqCst);
                     Ok(())
                 }
