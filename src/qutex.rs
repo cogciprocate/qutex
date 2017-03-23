@@ -86,6 +86,16 @@ impl<T> Future for FutureGuard<T> {
 
             match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| {
+                    // Sleeping before locking synchronizes something on
+                    // certain hardware which can prevent weird behavior (such
+                    // as out-of-date data from a load). Unknown if this is
+                    // OpenCL-specific or Intel-specific or what. This mimics
+                    // what a thread-mutex generally does in practice so I'm
+                    // sure there's a good explanation for why this helps
+                    // (please file an issue or submit a pull request to
+                    // explain if you know why sleeping here is sometimes
+                    // necessary).
+                    ::std::thread::sleep(::std::time::Duration::from_millis(1));
                     Guard { qutex: self.qutex.take().unwrap() }
                 })),
                 Err(e) => Err(e.into()),
