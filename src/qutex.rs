@@ -86,23 +86,11 @@ impl<T> Future for FutureGuard<T> {
 
             match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| {
-                    // Sleeping before locking synchronizes something on
-                    // certain hardware which can prevent weird behavior (such
-                    // as out-of-date data from a load). Unknown if this is
-                    // OpenCL-specific or Intel-specific or what. This mimics
-                    // what a thread-mutex generally does in practice so I'm
-                    // sure there's a good explanation for why this helps
-                    // (please file an issue or submit a pull request to
-                    // explain if you know why sleeping here is sometimes
-                    // necessary).
-                    ::std::thread::sleep(::std::time::Duration::from_millis(1));
                     Guard { qutex: self.qutex.take().unwrap() }
                 })),
                 Err(e) => Err(e.into()),
             }
         } else {
-            ///// [KEEPME]:
-            // Err("FutureGuard::poll: Task already completed.".into())
             panic!("FutureGuard::poll: Task already completed.");
         }
     }
@@ -113,7 +101,6 @@ impl<T> Future for FutureGuard<T> {
 #[derive(Debug)]
 pub struct Request {
     tx: oneshot::Sender<()>,
-    // wait_event: Option<Event>,
 }
 
 impl Request {
@@ -214,21 +201,28 @@ impl<T> Qutex<T> {
     // * Consider removing unsafe qualifier.
     // * Return proper error type.
     //
-    pub unsafe fn process_queue(&self) -> Result<(), &'static str> {
+    pub unsafe fn process_queue(&self) {
         match self.inner.state.compare_and_swap(0, 1, SeqCst) {
             // Unlocked:
             0 => {
-                if let Some(req) = self.inner.queue.try_pop() {
-                    // println!("Qutex::process_queue: Fulfilling lock request.");
-                    req.tx.send(()).map_err(|_| "Qutex queue has been dropped")
-                } else {
-                    // println!("Qutex::process_queue: Queue is empty.");
-                    self.inner.state.store(0, SeqCst);
-                    Ok(())
+                loop {
+                    if let Some(req) = self.inner.queue.try_pop() {
+                        // If there is a send error, a requester has dropped
+                        // its receiver so just go to the next.
+                        if req.tx.send(()).is_err() {
+                            continue;
+                        } else {
+                            // return Ok(())
+                        }
+                    } else {
+                        self.inner.state.store(0, SeqCst);
+                        // return Ok(());
+                    }
                 }
             },
             // Already locked, leave it alone:
-            1 => Ok(()),
+            // 1 => Ok(()),
+            1 => (),
             // Something else:
             n => panic!("Qutex::process_queue: inner.state: {}.", n),
         }
@@ -239,7 +233,7 @@ impl<T> Qutex<T> {
     // TODO: 
     // * Evaluate unsafe-ness.
     // * Return proper error type
-    pub unsafe fn direct_unlock(&self) -> Result<(), &'static str> {
+    pub unsafe fn direct_unlock(&self) {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
         self.process_queue()
@@ -267,7 +261,6 @@ impl<T> Clone for Qutex<T> {
 #[cfg(test)]
 // Woefully incomplete:
 mod tests {
-    #![allow(unused_variables, unused_imports, dead_code)]
     use super::*;
 
     #[test]
@@ -308,10 +301,10 @@ mod tests {
         for i in 0..thread_count {
             let future_guard = qutex.clone().request_lock();
 
-            threads.push(thread::spawn(|| {
+            threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
                 let mut guard = future_guard.wait().unwrap();
                 *guard += 1
-            }))            
+            }).unwrap())            
         }
 
         for thread in threads {
