@@ -47,7 +47,8 @@ impl<T> DerefMut for Guard<T> {
 
 impl<T> Drop for Guard<T> {
     fn drop(&mut self) {
-        unsafe { self.qutex.direct_unlock().expect("Error dropping Guard") };
+        // unsafe { self.qutex.direct_unlock().expect("Error dropping Guard") };
+        unsafe { self.qutex.direct_unlock() }
     }
 }
 
@@ -81,8 +82,10 @@ impl<T> Future for FutureGuard<T> {
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.qutex.is_some() {
-            unsafe { self.qutex.as_ref().unwrap().process_queue()
-                .expect("Error polling FutureGuard"); }
+            unsafe { 
+                self.qutex.as_ref().unwrap().process_queue()
+                    // .expect("Error polling FutureGuard"); 
+            }
 
             match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| {
@@ -201,6 +204,7 @@ impl<T> Qutex<T> {
     // * Consider removing unsafe qualifier.
     // * Return proper error type.
     //
+    // pub unsafe fn process_queue(&self) -> Result<(), ()> {
     pub unsafe fn process_queue(&self) {
         match self.inner.state.compare_and_swap(0, 1, SeqCst) {
             // Unlocked:
@@ -213,10 +217,12 @@ impl<T> Qutex<T> {
                             continue;
                         } else {
                             // return Ok(())
+                            break;
                         }
                     } else {
                         self.inner.state.store(0, SeqCst);
                         // return Ok(());
+                        break;
                     }
                 }
             },
@@ -233,6 +239,7 @@ impl<T> Qutex<T> {
     // TODO: 
     // * Evaluate unsafe-ness.
     // * Return proper error type
+    // pub unsafe fn direct_unlock(&self) -> Result<(), ()> {
     pub unsafe fn direct_unlock(&self) {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
@@ -307,11 +314,20 @@ mod tests {
             }).unwrap())            
         }
 
+        for i in 0..thread_count {
+            let future_guard = qutex.clone().request_lock();
+
+            threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
+                let mut guard = future_guard.wait().unwrap();
+                *guard -= 1
+            }).unwrap())            
+        }
+
         for thread in threads {
             thread.join().unwrap();
         }
 
         let guard = qutex.clone().request_lock().wait().unwrap();
-        assert!(*guard == start_val + thread_count as i32);
+        assert_eq!(*guard, start_val);
     }
 }
