@@ -14,7 +14,7 @@ use futures::sync::oneshot;
 use crossbeam::sync::SegQueue;
 
 
- // Allows access to the data contained within a lock just like a mutex guard.
+/// Allows access to the data contained within a lock just like a mutex guard.
 pub struct Guard<T> {
     qutex: Qutex<T>,
 }
@@ -300,26 +300,31 @@ mod tests {
     fn concurrent() {
         use std::thread;
 
-        let start_val = 10000i32;
-        let thread_count = 50;
+        let thread_count = 20; 
+        let mut threads = Vec::with_capacity(thread_count);        
+        let start_val = 0i32;
         let qutex = Qutex::new(start_val);
-        let mut threads = Vec::with_capacity(thread_count);
 
         for i in 0..thread_count {
             let future_guard = qutex.clone().request_lock();
 
+            let future_write = future_guard.and_then(|mut guard| {
+                *guard += 1;
+                Ok(())
+            });
+
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                let mut guard = future_guard.wait().unwrap();
-                *guard += 1
-            }).unwrap())            
+                future_write.wait().unwrap();
+            }).unwrap());
+        
         }
 
         for i in 0..thread_count {
             let future_guard = qutex.clone().request_lock();
 
-            threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
+            threads.push(thread::Builder::new().name(format!("test_thread_{}", i + thread_count)).spawn(|| {
                 let mut guard = future_guard.wait().unwrap();
-                *guard -= 1
+                *guard -= 1;
             }).unwrap())            
         }
 

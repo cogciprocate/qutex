@@ -2,7 +2,9 @@
 //! single-thread-optimized, which use Rust futures instead of
 //! thread-blocking.
 //!
+//! [![](https://img.shields.io/badge/github-qutex-blue.svg)][repo]
 //!
+//! [repo]: https://github.com/cogciprocate/qutex
 
 extern crate crossbeam;
 extern crate futures;

@@ -20,7 +20,7 @@ const PROCESSING: usize = 1 << 25;
 
 const PRINT_DEBUG: bool = false;
 
-// Allows read-only access to the data contained within a lock.
+/// Allows read-only access to the data contained within a lock.
 pub struct ReadGuard<T> {
     qutex: QrwLock<T>,
 }
@@ -56,7 +56,7 @@ impl<T> Drop for ReadGuard<T> {
 }
 
 
-// Allows read or write access to the data contained within a lock.
+/// Allows read or write access to the data contained within a lock.
 pub struct WriteGuard<T> {
     qutex: QrwLock<T>,
 }
@@ -598,24 +598,29 @@ mod tests {
     
     #[test]
     fn concurrent() {
-        let start_val = 10000i32;
+        let start_val = 0i32;
         let qutex = QrwLock::new(start_val);
-        let thread_count = 50;        
+        let thread_count = 20;        
         let mut threads = Vec::with_capacity(thread_count);
 
-        for i in 0..thread_count {
+        for _i in 0..thread_count {
             let future_write_guard = qutex.clone().request_write();
-
-            threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                let mut guard = future_write_guard.wait().unwrap();
-                *guard += 1
-            }).unwrap());
-
             let future_read_guard = qutex.clone().request_read();
 
-            threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                let _val = *future_read_guard.wait().unwrap();
-            }).unwrap());
+            let future_write = future_write_guard.and_then(|mut guard| {
+                *guard += 1;
+                Ok(())
+            });
+
+            let future_read = future_read_guard.and_then(move |_guard| {
+                // println!("Value for thread '{}' is: {}", _i, *_guard);
+                Ok(())
+            });
+
+            threads.push(thread::spawn(|| {
+                future_write.join(future_read).wait().unwrap();
+            }));
+        
         }
 
         for i in 0..thread_count {
