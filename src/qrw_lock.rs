@@ -20,22 +20,46 @@ const PROCESSING: usize = 1 << 25;
 
 const PRINT_DEBUG: bool = true;
 
+
+/// A very forgettable guard.
+trait Guard<T> where Self: ::std::marker::Sized {
+    fn lock(&self) -> &QrwLock<T>;
+
+    unsafe fn forget(self) {
+        ::std::mem::forget(self);
+    }
+}
+
+/// Extracts a `QrwLock` from a guard of either type.
+//
+// This saves us two unnecessary atomic stores (the reference count of lock
+// going up then down when releasing or up/downgrading) if we were to clone
+// then drop instead.
+unsafe fn extract_lock<T, G: Guard<T>>(guard: G) -> QrwLock<T> {
+    let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
+    ::std::ptr::copy_nonoverlapping(guard.lock(), &mut lock, 1);
+    ::std::mem::forget(guard);
+    lock
+}
+
+
 /// Allows read-only access to the data contained within a lock.
 pub struct ReadGuard<T> {
-    qutex: QrwLock<T>,
+    lock: QrwLock<T>,
 }
 
 impl<T> ReadGuard<T> {
     /// Releases the lock held by this `ReadGuard` and returns the original `QrwLock`.
-    pub fn unlock(self) -> QrwLock<T> {
+    pub fn release(self) -> QrwLock<T> {
         unsafe { 
             // All of this stuff simply saves us two unnecessary atomic stores
-            // (the reference count of qutex going up then down):
-            self.qutex.release_reader();
-            let mut qutex = ::std::mem::uninitialized::<QrwLock<T>>();
-            ::std::ptr::copy_nonoverlapping(&self.qutex, &mut qutex, 1);            
-            ::std::mem::forget(self);
-            qutex
+            // (the reference count of lock going up then down):
+            self.lock.release_read_lock();
+            // let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
+            // ::std::ptr::copy_nonoverlapping(&self.lock, &mut lock, 1);            
+            // ::std::mem::forget(self);
+            // lock
+            extract_lock(self)
         }
     }
 }
@@ -44,34 +68,52 @@ impl<T> Deref for ReadGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.qutex.inner.cell.get() }
+        unsafe { &*self.lock.inner.cell.get() }
     }
 }
 
 impl<T> Drop for ReadGuard<T> {
     fn drop(&mut self) {
-        // unsafe { self.qutex.direct_unlock().expect("Error dropping ReadGuard") };
-        unsafe { self.qutex.release_reader() }
+        // unsafe { self.lock.direct_release().expect("Error dropping ReadGuard") };
+        unsafe { self.lock.release_read_lock() }
+    }
+}
+
+impl<T> Guard<T> for ReadGuard<T> {
+    fn lock(&self) -> &QrwLock<T> {
+        &self.lock
     }
 }
 
 
 /// Allows read or write access to the data contained within a lock.
 pub struct WriteGuard<T> {
-    qutex: QrwLock<T>,
+    lock: QrwLock<T>,
 }
 
 impl<T> WriteGuard<T> {
-    /// Releases the lock held by this `WriteGuard` and returns the original `QrwLock`.
-    pub fn unlock(self) -> QrwLock<T> {
+    /// Converts this `WriteGuard` into a `ReadGuard` and fulfills any other
+    /// pending read requests.
+    pub fn downgrade(self) -> ReadGuard<T> {        
         unsafe { 
-            // All of this stuff simply saves us two unnecessary atomic stores
-            // (the reference count of qutex going up then down):
-            self.qutex.release_writer();
-            let mut qutex = ::std::mem::uninitialized::<QrwLock<T>>();
-            ::std::ptr::copy_nonoverlapping(&self.qutex, &mut qutex, 1);            
-            ::std::mem::forget(self);
-            qutex
+            self.lock.downgrade_write_lock(); 
+            // let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
+            // ::std::ptr::copy_nonoverlapping(&self.lock, &mut lock, 1);            
+            // ::std::mem::forget(self);
+            ReadGuard { lock: extract_lock(self) }
+        }
+    }
+
+    /// Releases the lock held by this `WriteGuard` and returns the original `QrwLock`.
+    pub fn release(self) -> QrwLock<T> {
+        unsafe { 
+            
+            // self.lock.release_write_lock();
+            // let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
+            // ::std::ptr::copy_nonoverlapping(&self.lock, &mut lock, 1);            
+            // ::std::mem::forget(self);
+            // lock
+            extract_lock(self)
         }
     }
 }
@@ -80,35 +122,41 @@ impl<T> Deref for WriteGuard<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        unsafe { &*self.qutex.inner.cell.get() }
+        unsafe { &*self.lock.inner.cell.get() }
     }
 }
 
 impl<T> DerefMut for WriteGuard<T> {
     fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.qutex.inner.cell.get() }
+        unsafe { &mut *self.lock.inner.cell.get() }
     }
 }
 
 impl<T> Drop for WriteGuard<T> {
     fn drop(&mut self) {
-        // unsafe { self.qutex.direct_unlock().expect("Error dropping WriteGuard") };
-        unsafe { self.qutex.release_writer() }
+        // unsafe { self.lock.direct_release().expect("Error dropping WriteGuard") };
+        unsafe { self.lock.release_write_lock() }
+    }
+}
+
+impl<T> Guard<T> for WriteGuard<T> {
+    fn lock(&self) -> &QrwLock<T> {
+        &self.lock
     }
 }
 
 
 /// A future which resolves to a `ReadGuard`.
 pub struct FutureReadGuard<T> {
-    qutex: Option<QrwLock<T>>,
+    lock: Option<QrwLock<T>>,
     rx: oneshot::Receiver<()>,
 }
 
 impl<T> FutureReadGuard<T> {
     /// Returns a new `FutureReadGuard`.
-    fn new(qutex: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureReadGuard<T> {
+    fn new(lock: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureReadGuard<T> {
         FutureReadGuard {
-            qutex: Some(qutex),
+            lock: Some(lock),
             rx: rx,
         }
     }
@@ -126,9 +174,9 @@ impl<T> Future for FutureReadGuard<T> {
 
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if self.qutex.is_some() {
-            unsafe { self.qutex.as_ref().unwrap().process_queue() }
-            self.rx.poll().map(|res| res.map(|_| ReadGuard { qutex: self.qutex.take().unwrap() }))
+        if self.lock.is_some() {
+            unsafe { self.lock.as_ref().unwrap().process_queue() }
+            self.rx.poll().map(|res| res.map(|_| ReadGuard { lock: self.lock.take().unwrap() }))
         } else {
             panic!("FutureReadGuard::poll: Task already completed.");
         }
@@ -137,15 +185,15 @@ impl<T> Future for FutureReadGuard<T> {
 
 /// A future which resolves to a `WriteGuard`.
 pub struct FutureWriteGuard<T> {
-    qutex: Option<QrwLock<T>>,
+    lock: Option<QrwLock<T>>,
     rx: oneshot::Receiver<()>,
 }
 
 impl<T> FutureWriteGuard<T> {
     /// Returns a new `FutureWriteGuard`.
-    fn new(qutex: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureWriteGuard<T> {
+    fn new(lock: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureWriteGuard<T> {
         FutureWriteGuard {
-            qutex: Some(qutex),
+            lock: Some(lock),
             rx: rx,
         }
     }
@@ -163,9 +211,9 @@ impl<T> Future for FutureWriteGuard<T> {
 
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-        if self.qutex.is_some() {
-            unsafe { self.qutex.as_ref().unwrap().process_queue() }
-            self.rx.poll().map(|res| res.map(|_| WriteGuard { qutex: self.qutex.take().unwrap() }))
+        if self.lock.is_some() {
+            unsafe { self.lock.as_ref().unwrap().process_queue() }
+            self.rx.poll().map(|res| res.map(|_| WriteGuard { lock: self.lock.take().unwrap() }))
         } else {
             panic!("FutureWriteGuard::poll: Task already completed.");
         }
@@ -181,7 +229,7 @@ pub enum RequestKind {
 }
 
 
-/// A request to lock the qutex for either read or write access.
+/// A request to lock the lock for either read or write access.
 #[derive(Debug)]
 pub struct QrwRequest {
     tx: oneshot::Sender<()>,
@@ -330,7 +378,6 @@ impl<T> QrwLock<T> {
 
     /// Returns the `RequestKind` for the next pending read or write lock request.
     fn peek_request_kind(&self) -> Option<RequestKind> {
-        // debug_assert_eq!(self.inner.state.load(Acquire) & PROCESSING, PROCESSING);
         unsafe { (*self.inner.tip.get()).as_ref().map(|req| req.kind) }
     }
 
@@ -378,7 +425,7 @@ impl<T> QrwLock<T> {
 
     /// Pops the next lock request in the queue if possible.
     ///
-    /// If this lock is unlocked, read or write-locks this lock and unparks
+    /// If this lock is releaseed, read or write-locks this lock and unparks
     /// the next requester task in the queue.
     ///
     /// If this lock is write-locked, this function does nothing. 
@@ -462,7 +509,29 @@ impl<T> QrwLock<T> {
                     // If already being processed or the next request is a write
                     // request, sleep.
                     ::std::thread::sleep(::std::time::Duration::new(0, 1));
+                    
+                    // NOTE: It's possible that sleeping here prolongs the
+                    // time it takes to process the queue to an unreasonable
+                    // degree. There may be an efficiency vs. duration balance
+                    // to strike here.
                 },
+            }
+        }
+    }
+
+    /// Converts a write lock into a read lock then processes the queue,
+    /// allowing additional read requests to acquire locks.
+    pub unsafe fn downgrade_write_lock(&self) {
+        debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
+
+        loop {
+            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
+                0 => unreachable!(),
+                WRITE_LOCKED => {
+                    self.inner.state.store(1, SeqCst);
+                    break;
+                },
+                state => debug_assert_eq!(state & PROCESSING, PROCESSING),
             }
         }
     }
@@ -471,7 +540,7 @@ impl<T> QrwLock<T> {
     /// in the queue if possible.
     //
     // TODO: Consider using `Ordering::Release`.
-    pub unsafe fn release_reader(&self) {
+    pub unsafe fn release_read_lock(&self) {
         if PRINT_DEBUG { println!("Releasing read lock..."); }
         // Ensure we are read locked and not processing or write locked:
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK != 0);
@@ -500,7 +569,7 @@ impl<T> QrwLock<T> {
     /// possible.
     //
     // TODO: Consider using `Ordering::Release`.
-    pub unsafe fn release_writer(&self) {
+    pub unsafe fn release_write_lock(&self) {
         if PRINT_DEBUG { println!("Releasing write lock..."); }
         // Ensure we are write locked and are not processing or read locked:
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
@@ -547,14 +616,14 @@ mod tests {
 
     #[test]
     fn simple() {
-        let qutex = QrwLock::from(0i32);
+        let lock = QrwLock::from(0i32);
 
-        let (future_r0_a, future_r0_b) = (qutex.clone().request_read(), qutex.clone().request_read());
-        let future_r0 = qutex.clone().request_read()
+        let (future_r0_a, future_r0_b) = (lock.clone().request_read(), lock.clone().request_read());
+        let future_r0 = lock.clone().request_read()
             .and_then(|guard| {
                 assert_eq!(*guard, 0);
                 println!("val[r0]: {}", *guard);
-                guard.unlock();
+                guard.release();
 
                 future_r0_a.and_then(|guard| {
                         assert_eq!(*guard, 0);
@@ -571,21 +640,21 @@ mod tests {
                 Ok(())
             });
 
-        let future_w0 = qutex.clone().request_write()
+        let future_w0 = lock.clone().request_write()
             .and_then(|mut guard| {
                 *guard = 5;
                 println!("val is now: {}", *guard);
                 Ok(())
             });
 
-        let future_r1 = qutex.clone().request_read()
+        let future_r1 = lock.clone().request_read()
             .and_then(|guard| {
                 assert_eq!(*guard, 5);
                 println!("val[r1]: {}", *guard);
                 Ok(())
             });
 
-        let future_r2 = qutex.clone().request_read()
+        let future_r2 = lock.clone().request_read()
             .and_then(|guard| {
                 assert_eq!(*guard, 5);
                 println!("val[r2]: {}", *guard);
@@ -594,24 +663,30 @@ mod tests {
 
         future_r0.join4(future_w0, future_r1, future_r2).wait().unwrap();
 
-        let future_guard = qutex.clone().request_read();
+        let future_guard = lock.clone().request_read();
         let guard = future_guard.wait().unwrap();
         assert_eq!(*guard, 5);
     }
     
+    // This doesn't really prove much... 
+    //
+    // * TODO: Actually determine whether or not the lock acquisition order is
+    //   upheld.
+    //
     #[test]
     fn concurrent() {
         let start_val = 0i32;
-        let qutex = QrwLock::new(start_val);
+        let lock = QrwLock::new(start_val);
         let thread_count = 20;        
         let mut threads = Vec::with_capacity(thread_count);
 
         for _i in 0..thread_count {
-            let future_write_guard = qutex.clone().request_write();
-            let future_read_guard = qutex.clone().request_read();
+            let future_write_guard = lock.clone().request_write();
+            let future_read_guard = lock.clone().request_read();
 
             let future_write = future_write_guard.and_then(|mut guard| {
                 *guard += 1;
+                guard.downgrade();
                 Ok(())
             });
 
@@ -622,19 +697,18 @@ mod tests {
 
             threads.push(thread::spawn(|| {
                 future_write.join(future_read).wait().unwrap();
-            }));
-        
+            }));        
         }
 
         for i in 0..thread_count {
-            let future_write_guard = qutex.clone().request_write();
+            let future_write_guard = lock.clone().request_write();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
                 let mut guard = future_write_guard.wait().unwrap();
                 *guard -= 1
             }).unwrap());
 
-            let future_read_guard = qutex.clone().request_read();
+            let future_read_guard = lock.clone().request_read();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
                 let _val = *future_read_guard.wait().unwrap();
@@ -645,7 +719,7 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = qutex.clone().request_read().wait().unwrap();
+        let guard = lock.clone().request_read().wait().unwrap();
         assert_eq!(*guard, start_val);
     }
 }
