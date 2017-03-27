@@ -330,7 +330,7 @@ impl<T> QrwLock<T> {
 
     /// Returns the `RequestKind` for the next pending read or write lock request.
     fn peek_request_kind(&self) -> Option<RequestKind> {
-        debug_assert_eq!(self.inner.state.load(Acquire) & PROCESSING, PROCESSING);
+        // debug_assert_eq!(self.inner.state.load(Acquire) & PROCESSING, PROCESSING);
         unsafe { (*self.inner.tip.get()).as_ref().map(|req| req.kind) }
     }
 
