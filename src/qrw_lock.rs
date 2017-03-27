@@ -18,7 +18,7 @@ const READ_COUNT_MASK: usize = 0x00FFFFFF;
 const WRITE_LOCKED: usize = 1 << 24;
 const PROCESSING: usize = 1 << 25;
 
-const PRINT_DEBUG: bool = false;
+const PRINT_DEBUG: bool = true;
 
 /// Allows read-only access to the data contained within a lock.
 pub struct ReadGuard<T> {
@@ -173,6 +173,7 @@ impl<T> Future for FutureWriteGuard<T> {
 }
 
 
+/// Specifies whether a `QrwRequest` is a read or write request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     Read,
@@ -457,8 +458,10 @@ impl<T> QrwLock<T> {
 
                         break;
                     }
+
                     // If already being processed or the next request is a write
-                    // request, do nothing.
+                    // request, sleep.
+                    ::std::thread::sleep(::std::time::Duration::new(0, 1));
                 },
             }
         }
@@ -510,7 +513,7 @@ impl<T> QrwLock<T> {
                     self.inner.state.store(0, SeqCst);
                     break;
                 },
-                state => debug_assert_eq!(state, PROCESSING),
+                state => debug_assert_eq!(state & PROCESSING, PROCESSING),
             }
         }
 
