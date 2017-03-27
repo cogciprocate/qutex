@@ -33,8 +33,10 @@ trait Guard<T> where Self: ::std::marker::Sized {
 /// Extracts a `QrwLock` from a guard of either type.
 //
 // This saves us two unnecessary atomic stores (the reference count of lock
-// going up then down when releasing or up/downgrading) if we were to clone
-// then drop instead.
+// going up then down when releasing or up/downgrading) which would occur if
+// we were to clone then drop.
+//
+// QUESTION: Is there a more elegant way to do this?
 unsafe fn extract_lock<T, G: Guard<T>>(guard: G) -> QrwLock<T> {
     let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
     ::std::ptr::copy_nonoverlapping(guard.lock(), &mut lock, 1);
@@ -49,16 +51,23 @@ pub struct ReadGuard<T> {
 }
 
 impl<T> ReadGuard<T> {
+    pub fn upgrade(self) -> WriteGuard<T> {
+        // * [DONE] Create an 'upgrade' oneshot on the `QrwLock` (`Inner`).
+        // * [DONE] Create a new type: `FutureUpgrade`.
+        // * Initially, check the read count to see if we can upgrade immediately.
+        // * Add a check so that each time the read count is decremented, if
+        //   the new count == 1 we complete the oneshot.
+
+
+
+        unimplemented!();
+
+    }
+
     /// Releases the lock held by this `ReadGuard` and returns the original `QrwLock`.
     pub fn release(self) -> QrwLock<T> {
         unsafe { 
-            // All of this stuff simply saves us two unnecessary atomic stores
-            // (the reference count of lock going up then down):
             self.lock.release_read_lock();
-            // let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
-            // ::std::ptr::copy_nonoverlapping(&self.lock, &mut lock, 1);            
-            // ::std::mem::forget(self);
-            // lock
             extract_lock(self)
         }
     }
@@ -97,22 +106,18 @@ impl<T> WriteGuard<T> {
     pub fn downgrade(self) -> ReadGuard<T> {        
         unsafe { 
             self.lock.downgrade_write_lock(); 
-            // let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
-            // ::std::ptr::copy_nonoverlapping(&self.lock, &mut lock, 1);            
-            // ::std::mem::forget(self);
             ReadGuard { lock: extract_lock(self) }
         }
     }
 
     /// Releases the lock held by this `WriteGuard` and returns the original `QrwLock`.
+    //
+    // * TODO: Create a test that ensures the write lock is released.
+    //   Commenting out the `release_write_lock()' line appears to have no
+    //   effect on the outcome of the current tests.
     pub fn release(self) -> QrwLock<T> {
-        unsafe { 
-            
-            // self.lock.release_write_lock();
-            // let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
-            // ::std::ptr::copy_nonoverlapping(&self.lock, &mut lock, 1);            
-            // ::std::mem::forget(self);
-            // lock
+        unsafe {             
+            self.lock.release_write_lock();
             extract_lock(self)
         }
     }
@@ -144,6 +149,39 @@ impl<T> Guard<T> for WriteGuard<T> {
         &self.lock
     }
 }
+
+
+/// A precursor to a `WriteGuard`.
+pub struct FutureUpgrade<T> {
+    lock: Option<QrwLock<T>>,
+    rx: oneshot::Receiver<()>,
+}
+
+impl<T> FutureUpgrade<T> {
+    /// Returns a new `FutureUpgrade`.
+    fn new(lock: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureUpgrade<T> {
+        FutureUpgrade {
+            lock: Some(lock),
+            rx: rx,
+        }
+    }
+}
+
+impl<T> Future for FutureUpgrade<T> {
+    type Item = WriteGuard<T>;
+    type Error = Canceled;
+
+    #[inline]
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        if self.lock.is_some() {
+            unsafe { self.lock.as_ref().unwrap().process_queue() }
+            self.rx.poll().map(|res| res.map(|_| WriteGuard { lock: self.lock.take().unwrap() }))
+        } else {
+            panic!("FutureUpgrade::poll: Task already completed.");
+        }
+    }
+}
+
 
 
 /// A future which resolves to a `ReadGuard`.
@@ -247,12 +285,14 @@ impl QrwRequest {
 }
 
 
+/// The guts of a `QrwLock`.
 struct Inner<T> {
     // TODO: Convert to `AtomicBool` if no additional states are needed:
     state: AtomicUsize,
     cell: UnsafeCell<T>,
     queue: SegQueue<QrwRequest>,
     tip: UnsafeCell<Option<QrwRequest>>,
+    upgrade_tx: UnsafeCell<Option<oneshot::Sender<()>>>,
 }
 
 impl<T> From<T> for Inner<T> {
@@ -263,6 +303,7 @@ impl<T> From<T> for Inner<T> {
             cell: UnsafeCell::new(val),
             queue: SegQueue::new(),
             tip: UnsafeCell::new(None),
+            upgrade_tx: UnsafeCell::new(None),
         }
     }
 }
@@ -288,7 +329,8 @@ impl<T> QrwLock<T> {
     /// Returns a new `FutureReadGuard` which can be used as a future and will
     /// resolve into a `ReadGuard`.
     pub fn request_read(self) -> FutureReadGuard<T> {
-        if PRINT_DEBUG { println!("Requesting read lock."); }
+        if PRINT_DEBUG { println!("Requesting read lock.(thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
         let (tx, rx) = oneshot::channel();
         unsafe { self.push_request(QrwRequest::new(tx, RequestKind::Read)); }
         FutureReadGuard::new(self, rx)
@@ -297,7 +339,8 @@ impl<T> QrwLock<T> {
     /// Returns a new `FutureWriteGuard` which can be used as a future and will
     /// resolve into a `WriteGuard`.
     pub fn request_write(self) -> FutureWriteGuard<T> {
-        if PRINT_DEBUG { println!("Requesting write lock."); }
+        if PRINT_DEBUG { println!("Requesting write lock.(thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
         let (tx, rx) = oneshot::channel();
         unsafe { self.push_request(QrwRequest::new(tx, RequestKind::Write)); }
         FutureWriteGuard::new(self, rx)
@@ -347,24 +390,7 @@ impl<T> QrwLock<T> {
     fn pop_request(&self) -> Option<QrwRequest> {
         debug_assert_eq!(self.inner.state.load(Acquire) & PROCESSING, PROCESSING);
 
-        // unsafe { ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop()) }      
-
-        unsafe { 
-            // match ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop()) {
-            //     Some(req) => Some(req),
-            //     None => {                    
-            //         // let pop = self.inner.queue.try_pop();
-            //         // *self.inner.tip.get() = self.inner.queue.try_pop();
-            //         // pop
-
-            //         if (*self.inner.tip.get()).is_some() {
-            //             self.pop_request()
-            //         } else {
-            //             None
-            //         }
-            //     },
-            // }
-
+        unsafe {
             ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop())
                 .or_else(|| {
                     if (*self.inner.tip.get()).is_some() {
@@ -395,7 +421,8 @@ impl<T> QrwLock<T> {
                     match req.kind {
                         RequestKind::Read => {
                             state += 1;
-                            if PRINT_DEBUG { println!("Locked for reading (state: {}).", state); }
+                            if PRINT_DEBUG { println!("Locked for reading (state: {}) (thread: {}) ...", 
+                                state, ::std::thread::current().name().unwrap_or("<unnamed>")); }
 
                             if let Some(RequestKind::Read) = self.peek_request_kind() {                                
                                 continue;
@@ -408,7 +435,8 @@ impl<T> QrwLock<T> {
                             // break;
                             debug_assert_eq!(state, 0); 
                             state = WRITE_LOCKED;
-                            if PRINT_DEBUG { println!("Locked for writing (state: {}).", state); }
+                            if PRINT_DEBUG { println!("Locked for writing (state: {}) (thread: {}) ...", 
+                                state, ::std::thread::current().name().unwrap_or("<unnamed>")); }
                             break;
                         },
                     }
@@ -443,27 +471,16 @@ impl<T> QrwLock<T> {
     //
     // pub unsafe fn process_queue(&self) -> Result<(), ()> {
     pub unsafe fn process_queue(&self) {
-        // fn fulfill_request(state: &AtomicUsize, kind: RequestKind) {
-        //     debug_assert_eq!(state.load(Acquire) & WRITE_LOCKED, 0);
-
-        //     match kind {
-        //         RequestKind::Read => {
-                    
-        //         },
-        //         RequestKind::Write => {
-        //             state.store(WRITE_LOCKED, SeqCst)
-        //         },
-        //     }
-        // }
-
-        if PRINT_DEBUG { println!("Processing queue..."); }
+        if PRINT_DEBUG { println!("Processing queue (thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
 
         loop {
             // match self.inner.state.load(SeqCst) {
             match self.inner.state.fetch_or(PROCESSING, SeqCst) {
                 // Unlocked:
                 0 => {
-                    if PRINT_DEBUG { println!("Processing queue: Unlocked"); }
+                    if PRINT_DEBUG { println!("Processing queue: Unlocked (thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
                     let new_state = self.fulfill_request(0);
                     self.inner.state.store(new_state, SeqCst);
                     break;
@@ -471,15 +488,16 @@ impl<T> QrwLock<T> {
 
                 // Write locked, unset PROCESSING flag:
                 WRITE_LOCKED => {
-                    if PRINT_DEBUG { println!("Processing queue: Write Locked"); }
+                    if PRINT_DEBUG { println!("Processing queue: Write Locked (thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
                     self.inner.state.store(WRITE_LOCKED, SeqCst);
                     break;
                 },
 
                 // Either read locked or already being processed:
                 state => {
-                    if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }}", 
-                        state, self.peek_request_kind()); }
+                    if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }} (thread: {}) ...", 
+                    state, self.peek_request_kind(), ::std::thread::current().name().unwrap_or("<unnamed>")); }
 
                     // Ensure that if WRITE_LOCKED is set, PROCESSING is also set.
                     debug_assert!(
@@ -507,7 +525,7 @@ impl<T> QrwLock<T> {
                     }
 
                     // If already being processed or the next request is a write
-                    // request, sleep.
+                    // request, sleep:
                     ::std::thread::sleep(::std::time::Duration::new(0, 1));
                     
                     // NOTE: It's possible that sleeping here prolongs the
@@ -541,12 +559,12 @@ impl<T> QrwLock<T> {
     //
     // TODO: Consider using `Ordering::Release`.
     pub unsafe fn release_read_lock(&self) {
-        if PRINT_DEBUG { println!("Releasing read lock..."); }
+        if PRINT_DEBUG { println!("Releasing read lock...(thread: {}) ...", 
+            ::std::thread::current().name().unwrap_or("<unnamed>")); }
+
         // Ensure we are read locked and not processing or write locked:
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK != 0);
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, 0);
-
-        // self.inner.state.fetch_sub(1, SeqCst);
 
         loop {
             match self.inner.state.fetch_or(PROCESSING, SeqCst) {
@@ -570,7 +588,9 @@ impl<T> QrwLock<T> {
     //
     // TODO: Consider using `Ordering::Release`.
     pub unsafe fn release_write_lock(&self) {
-        if PRINT_DEBUG { println!("Releasing write lock..."); }
+        if PRINT_DEBUG { println!("Releasing write lock...(thread: {}) ...", 
+            ::std::thread::current().name().unwrap_or("<unnamed>")); }
+
         // Ensure we are write locked and are not processing or read locked:
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK == 0);
