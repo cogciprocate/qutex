@@ -182,7 +182,7 @@ impl<T> Qutex<T> {
 
     /// Returns a reference to the inner value.
     ///
-    /// This is frought with potential peril.
+    /// This is fraught with potential peril.
     ///
     #[inline]
     pub fn as_ptr(&self) -> *const T {

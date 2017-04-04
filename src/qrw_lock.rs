@@ -6,6 +6,10 @@
 //   from simplifying refactoring.
 //   - Locking for processing, looping, and resetting the processing flag all
 //     need to be standardized (factored out).
+// * Evaluate whether or not sleeping when the lock is contended (`PROCESSING`
+//   bit) is the best approach. This may be slower than it needs to be when
+//   multiple cores are concurrently attempting to access.
+//
 
 
 use std::ops::{Deref, DerefMut};
@@ -22,7 +26,7 @@ const READ_COUNT_MASK: usize = 0x00FFFFFF;
 const WRITE_LOCKED: usize = 1 << 24;
 const PROCESSING: usize = 1 << 25;
 
-const PRINT_DEBUG: bool = true;
+const PRINT_DEBUG: bool = false;
 
 
 /// A very forgettable guard.
@@ -42,8 +46,7 @@ trait Guard<T> where Self: ::std::marker::Sized {
 //
 // QUESTION: Is there a more elegant way to do this?
 unsafe fn extract_lock<T, G: Guard<T>>(guard: G) -> QrwLock<T> {
-    let mut lock = ::std::mem::uninitialized::<QrwLock<T>>();
-    ::std::ptr::copy_nonoverlapping(guard.lock(), &mut lock, 1);
+    let lock = ::std::ptr::read(guard.lock());
     ::std::mem::forget(guard);
     lock
 }
@@ -56,34 +59,41 @@ pub struct ReadGuard<T> {
 
 impl<T> ReadGuard<T> {
     pub fn upgrade(guard: ReadGuard<T>) -> FutureUpgrade<T> {
-        // * [DONE] Create an 'upgrade' oneshot on the `QrwLock` (`Inner`).
-        // * [DONE][UNDONE] Create a new type: `FutureUpgrade`.
-        // * [DONE] Initially, check the read count to see if we can upgrade
-        //   immediately.
-        // * [DONE] Add a check so that each time the read count is
-        //   decremented, if the new count == 1 we complete the oneshot.
+        debug_assert!(guard.lock.read_count().unwrap() > 0);
 
-        debug_assert!(guard.lock.read_count() > 0);
+        // fn new_future_upgrade<U>(guard: ReadGuard<U>) -> FutureUpgrade<U> {
+        //     if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
+        //         ::std::thread::current().name().unwrap_or("<unnamed>")); }
+        //     let (tx, rx) = oneshot::channel();
+        //     unsafe { (*guard.lock.inner.upgrade_tx.get()) = Some(tx); }
+        //     unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
+        // }
 
-        if guard.lock.read_count() == 1 {
-            // * [DONE] Convert read lock into write lock (create `::upgrade`
-            //   method on `QrwLock`.
-            // * [DONE] Return `FutureWriteGuard` which will immediately
-            //   resolve to a `WriteGuard` (or return a `FutureUpgrade`).
-            guard.lock.upgrade_write_lock();
-            unsafe { FutureUpgrade::new(extract_lock(guard), None) }
-        } else {
-            // * [DONE] Return a `FutureWriteGuard` (or `FutureUgrade`) which
-            //   will wait until the read count == 1.
-            //   * This must be triggered by `::release_read_lock`.
+        // if guard.lock.read_count() == 1 {
+        //     match guard.lock.upgrade_write_lock() {
+        //         Ok(_) => unsafe { FutureUpgrade::new(extract_lock(guard), None) },
+        //         Err(_) => new_future_upgrade(guard),
+        //     }            
+        // } else {
+        //     new_future_upgrade(guard)            
+        // }
 
-            if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
-                ::std::thread::current().name().unwrap_or("<unnamed>")); }
-            let (tx, rx) = oneshot::channel();
-            debug_assert_eq!(guard.lock.inner.state.load(Acquire) & PROCESSING, PROCESSING);
-            unsafe { (*guard.lock.inner.upgrade_tx.get()) = Some(tx); }
-            unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
-        }
+        match unsafe { guard.lock.upgrade_read_lock() } {
+            Ok(_) => {
+                if PRINT_DEBUG { println!("Read lock is now upgraded (thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
+                unsafe { FutureUpgrade::new(extract_lock(guard), None) }
+            },
+            Err(rx) => {
+                if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
+                    ::std::thread::current().name().unwrap_or("<unnamed>")); }
+
+                // let (tx, rx) = oneshot::channel();
+
+                // unsafe { (*guard.lock.inner.upgrade_tx.get()) = Some(tx); }
+                unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
+            }
+        }    
     }
 
     /// Releases the lock held by this `ReadGuard` and returns the original `QrwLock`.
@@ -197,6 +207,9 @@ impl<T> Future for FutureUpgrade<T> {
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
+            if PRINT_DEBUG { println!("Polling FutureUpgrade (thread: {}) ...", 
+                ::std::thread::current().name().unwrap_or("<unnamed>")); }
+
             if self.rx.is_none() {
                 Ok(Async::Ready(WriteGuard { lock: self.lock.take().unwrap() }))
             } else {
@@ -399,7 +412,7 @@ impl<T> QrwLock<T> {
 
     /// Returns a reference to the inner value.
     ///
-    /// This is frought with potential peril.
+    /// This is fraught with potential peril.
     ///
     #[inline]
     pub fn as_ptr(&self) -> *const T {
@@ -481,7 +494,7 @@ impl<T> QrwLock<T> {
 
     /// Pops the next lock request in the queue if possible.
     ///
-    /// If this lock is releaseed, read or write-locks this lock and unparks
+    /// If this lock is released, read or write-locks this lock and unparks
     /// the next requester task in the queue.
     ///
     /// If this lock is write-locked, this function does nothing. 
@@ -494,7 +507,8 @@ impl<T> QrwLock<T> {
     //
     // TODO: 
     // * This is currently public due to 'derivers' (aka. sub-types). Evaluate.
-    // * Consider removing unsafe qualifier.
+    // * Consider removing unsafe qualifier (should be fine, this fn assumes
+    //   no particular state).
     // * Return proper error type.
     //
     // pub unsafe fn process_queue(&self) -> Result<(), ()> {
@@ -524,8 +538,9 @@ impl<T> QrwLock<T> {
 
                 // Either read locked or already being processed:
                 state => {
-                    if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }} (thread: {}) ...", 
-                        state, self.peek_request_kind(), ::std::thread::current().name().unwrap_or("<unnamed>")); }
+                    if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }} \
+                        (thread: {}) ...", state, self.peek_request_kind(), 
+                        ::std::thread::current().name().unwrap_or("<unnamed>")); }
 
                     // Ensure that if WRITE_LOCKED is set, PROCESSING is also set.
                     debug_assert!(
@@ -566,51 +581,57 @@ impl<T> QrwLock<T> {
     }
 
     /// Returns the current number of read locks.
-    fn read_count(&self) -> u32 {
-        if PRINT_DEBUG { println!("Checking read count: (thread: {}) ...", 
-            ::std::thread::current().name().unwrap_or("<unnamed>")); }
+    ///
+    /// Currently used for debug purposes only.
+    fn read_count(&self) -> Option<u32> {
+        let state = self.inner.state.load(Acquire);
+        let read_count = state & READ_COUNT_MASK;
 
-        loop {
-            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                0 => {
-                    // Is a release ok here considering that other attempts to
-                    // process may be in progress?
-                    self.inner.state.store(0, SeqCst);
-                    return 0;
-                },
-                WRITE_LOCKED => unreachable!(),
-                state => {
-                    // If not already being processed...
-                    if state & PROCESSING != PROCESSING {
-                        debug_assert!(state <= READ_COUNT_MASK);
-                        self.inner.state.store(state, SeqCst);
-                        return state as u32;
-                    } else {
-                        // If already being processed, sleep:
-                        ::std::thread::sleep(::std::time::Duration::new(0, 1));
-                    }                    
-                },
-            }
-        }   
+        if state & READ_COUNT_MASK == read_count {
+            if PRINT_DEBUG { println!("Read count: {} (thread: {}) ...", read_count,
+                ::std::thread::current().name().unwrap_or("<unnamed>")); }
+            Some(read_count as u32)
+        } else {
+            None
+        }
     }
 
     /// Converts a single read lock (read count of '1') into a write lock.
     ///
-    /// Assumes that there is only one read lock.
-    fn upgrade_write_lock(&self) {
+    /// Returns an error containing a oneshot receiver if there is currently
+    /// more than one read lock. When the read count reaches one, the receiver
+    /// channel will be completed (i.e. poll it).
+    ///
+    /// Panics if there are no read locks.
+    ///
+    /// Do not call this method directly unless you are using a custom guard
+    /// or are otherwise managing the lock state manually. Use
+    /// `ReadGuard::upgrade` instead.
+    pub unsafe fn upgrade_read_lock(&self) -> Result<(), oneshot::Receiver<()>> {
         if PRINT_DEBUG { println!("Upgrading reader to writer: (thread: {}) ...", 
             ::std::thread::current().name().unwrap_or("<unnamed>")); }
 
         loop {
             match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                0 => unreachable!(),
-                WRITE_LOCKED => unreachable!(),
+                0 => panic!("Unable to upgrade this QrwLock: no read locks."),
+                WRITE_LOCKED => panic!("Unable to upgrade this QrwLock: already write locked."),
                 state => {
+                    println!("state: {}", state);
+
                     // If not already being processed...
                     if state & PROCESSING != PROCESSING {
-                        debug_assert!(state == 1);
-                        debug_assert!(self.read_count() == 1);
-                        self.inner.state.store(WRITE_LOCKED, SeqCst);
+                        debug_assert_eq!(state, self.read_count().unwrap() as usize);
+
+                        if state == 1 { 
+                            self.inner.state.store(WRITE_LOCKED, SeqCst);
+                            return Ok(())
+                        } else {
+                            let (tx, rx) = oneshot::channel();
+                            // unsafe { *self.inner.upgrade_tx.get() = Some(tx); }
+                            *self.inner.upgrade_tx.get() = Some(tx);
+                            self.inner.state.store(state, SeqCst);
+                            return Err(rx);
+                        }
                     } else {
                         // If already being processed, sleep:
                         ::std::thread::sleep(::std::time::Duration::new(0, 1));
@@ -661,15 +682,18 @@ impl<T> QrwLock<T> {
                     if state & PROCESSING != PROCESSING {
                         debug_assert!(state > 0 && state <= READ_COUNT_MASK);
                         let new_state = state - 1;
-                        self.inner.state.store(new_state, SeqCst);
+                        
 
                         // If an upgrade (read lock -> write lock) is pending
                         // and we have just reached a read lock count of 1:
                         if new_state == 1 && (*self.inner.upgrade_tx.get()).is_some() {
-                            let tx = (*self.inner.upgrade_tx.get()).take().unwrap();
+                            self.inner.state.store(WRITE_LOCKED, SeqCst);
                             // Send the upgrade signal. Ignore any errors (if
                             // the upgrade receiver has dropped):
+                            let tx = (*self.inner.upgrade_tx.get()).take().unwrap();
                             tx.send(()).ok();
+                        } else {
+                            self.inner.state.store(new_state, SeqCst);
                         }
 
                         break;                   
@@ -733,6 +757,7 @@ impl<T> Clone for QrwLock<T> {
 // Woefully incomplete.
 mod tests {
     use std::thread;
+    use futures::future;
     use super::*;    
 
     #[test]
@@ -740,53 +765,71 @@ mod tests {
         let lock = QrwLock::from(0i32);
 
         let (future_r0_a, future_r0_b) = (lock.clone().request_read(), lock.clone().request_read());
-        let future_r0 = lock.clone().request_read()
-            .and_then(|guard| {
-                assert_eq!(*guard, 0);
-                println!("val[r0]: {}", *guard);
-                ReadGuard::release(guard);
+        let future_r0 = lock.clone().request_read().and_then(|guard| {
+            assert_eq!(*guard, 0);
+            println!("val[r0]: {}", *guard);
+            ReadGuard::release(guard);
 
-                future_r0_a.and_then(|guard| {
-                        assert_eq!(*guard, 0);
-                        println!("val[r0a]: {}", *guard);
-                        Ok(())
-                    }).wait().unwrap();
+            future_r0_a.and_then(|guard| {
+                    assert_eq!(*guard, 0);
+                    println!("val[r0a]: {}", *guard);
+                    Ok(())
+                }).wait().unwrap();
 
-                future_r0_b.and_then(|guard| {
-                        assert_eq!(*guard, 0);
-                        println!("val[r0b]: {}", *guard);
-                        Ok(())
-                    }).wait().unwrap();
+            future_r0_b.and_then(|guard| {
+                    assert_eq!(*guard, 0);
+                    println!("val[r0b]: {}", *guard);
+                    Ok(())
+                }).wait().unwrap();
 
+            Ok(())
+        }).boxed();
+
+        let future_w0 = lock.clone().request_write().and_then(|mut guard| {
+            *guard = 5;
+            println!("val is now: {}", *guard);
+            Ok(())
+        }).boxed();
+
+        let future_r1 = lock.clone().request_read().and_then(|guard| {
+            assert_eq!(*guard, 5);
+            println!("val[r1]: {}", *guard);
+            Ok(())
+        }).boxed();
+
+        let future_r2 = lock.clone().request_read().and_then(|guard| {
+            assert_eq!(*guard, 5);
+            println!("val[r2]: {}", *guard);
+            Ok(())
+        }).boxed();
+
+        let future_u0 = lock.clone().request_read().and_then(|read_guard| {
+            println!("Upgrading read guard...");
+            ReadGuard::upgrade(read_guard).and_then(|mut write_guard| {
+                println!("Read guard upgraded.");
+                *write_guard = 6;
                 Ok(())
-            });
+            })
+        }).boxed();
 
-        let future_w0 = lock.clone().request_write()
-            .and_then(|mut guard| {
-                *guard = 5;
-                println!("val is now: {}", *guard);
-                Ok(())
-            });
+        // This read will take place before the above read lock can be
+        // upgraded because read requests are processed in a chained fashion:
+        let future_r3 = lock.clone().request_read().and_then(|guard| {
+            // Value should not yet be affected by the events following the
+            // above write guard upgrade.
+            assert_eq!(*guard, 5);
+            println!("val[r3]: {}", *guard);
+            Ok(())
+        }).boxed();
 
-        let future_r1 = lock.clone().request_read()
-            .and_then(|guard| {
-                assert_eq!(*guard, 5);
-                println!("val[r1]: {}", *guard);
-                Ok(())
-            });
+        // future_r0.join4(future_w0, future_r1, future_r2).wait().unwrap();
 
-        let future_r2 = lock.clone().request_read()
-            .and_then(|guard| {
-                assert_eq!(*guard, 5);
-                println!("val[r2]: {}", *guard);
-                Ok(())
-            });
-
-        future_r0.join4(future_w0, future_r1, future_r2).wait().unwrap();
+        let futures = vec![future_r0, future_w0, future_r1, future_r2, future_u0, future_r3];
+        future::join_all(futures).wait().unwrap();
 
         let future_guard = lock.clone().request_read();
         let guard = future_guard.wait().unwrap();
-        assert_eq!(*guard, 5);
+        assert_eq!(*guard, 6);
     }
     
     // This doesn't really prove much... 
@@ -811,9 +854,9 @@ mod tests {
                 Ok(())
             });
 
-            let future_read = future_read_guard.and_then(move |_guard| {
+            let future_read = future_read_guard.and_then(move |guard| {
                 // println!("Value for thread '{}' is: {}", _i, *_guard);
-                Ok(())
+                Ok(guard)
             });
 
             threads.push(thread::spawn(|| {
