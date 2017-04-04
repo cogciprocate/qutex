@@ -173,6 +173,7 @@ impl<T> Guard<T> for WriteGuard<T> {
 
 
 /// A precursor to a `WriteGuard`.
+#[must_use = "futures do nothing unless polled"]
 pub struct FutureUpgrade<T> {
     lock: Option<QrwLock<T>>,
     // Designates whether or not to resolve immediately:
@@ -210,6 +211,7 @@ impl<T> Future for FutureUpgrade<T> {
 
 
 /// A future which resolves to a `ReadGuard`.
+#[must_use = "futures do nothing unless polled"]
 pub struct FutureReadGuard<T> {
     lock: Option<QrwLock<T>>,
     rx: oneshot::Receiver<()>,
@@ -248,6 +250,7 @@ impl<T> Future for FutureReadGuard<T> {
 
 
 /// A future which resolves to a `WriteGuard`.
+#[must_use = "futures do nothing unless polled"]
 pub struct FutureWriteGuard<T> {
     lock: Option<QrwLock<T>>,
     rx: oneshot::Receiver<()>,
@@ -727,7 +730,7 @@ impl<T> Clone for QrwLock<T> {
 
 
 #[cfg(test)]
-// Woefully incomplete:
+// Woefully incomplete.
 mod tests {
     use std::thread;
     use super::*;    
@@ -788,7 +791,7 @@ mod tests {
     
     // This doesn't really prove much... 
     //
-    // * TODO: Actually determine whether or not the lock acquisition order is
+    // * TODO: *Actually* determine whether or not the lock acquisition order is
     //   upheld.
     //
     #[test]

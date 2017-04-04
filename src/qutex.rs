@@ -54,6 +54,7 @@ impl<T> Drop for Guard<T> {
 
 
 /// A future which resolves to a `Guard`.
+#[must_use = "futures do nothing unless polled"]
 pub struct FutureGuard<T> {
     qutex: Option<Qutex<T>>,
     rx: oneshot::Receiver<()>,
