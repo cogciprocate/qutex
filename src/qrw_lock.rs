@@ -1,11 +1,11 @@
 //! A queue-backed exclusive data lock.
-//!
 //
 // * It is unclear how many of the unsafe methods within need actually remain
 //   unsafe.
 // * Virtually every aspect of each of the types in this module would benefit
 //   from simplifying refactoring.
-//   - Locking for processing needs to be made standard (factored out).
+//   - Locking for processing, looping, and resetting the processing flag all
+//     need to be standardized (factored out).
 
 
 use std::ops::{Deref, DerefMut};
@@ -55,40 +55,42 @@ pub struct ReadGuard<T> {
 }
 
 impl<T> ReadGuard<T> {
-    pub fn upgrade(self) -> FutureUpgrade<T> {
+    pub fn upgrade(guard: ReadGuard<T>) -> FutureUpgrade<T> {
         // * [DONE] Create an 'upgrade' oneshot on the `QrwLock` (`Inner`).
         // * [DONE][UNDONE] Create a new type: `FutureUpgrade`.
-        // * [DONE] Initially, check the read count to see if we can upgrade immediately.
-        // * [DONE] Add a check so that each time the read count is decremented, if
-        //   the new count == 1 we complete the oneshot.
+        // * [DONE] Initially, check the read count to see if we can upgrade
+        //   immediately.
+        // * [DONE] Add a check so that each time the read count is
+        //   decremented, if the new count == 1 we complete the oneshot.
 
-        debug_assert!(self.lock.read_count() > 0);
+        debug_assert!(guard.lock.read_count() > 0);
 
-        if self.lock.read_count() == 1 {
-            // * [DONE] Convert read lock into write lock (create `::upgrade` method on `QrwLock`.
-            // * [DONE] Return `FutureWriteGuard` which will immediately resolve to a
-            //   `WriteGuard` (or return a `FutureUpgrade`).
-            self.lock.upgrade_write_lock();
-            unsafe { FutureUpgrade::new(extract_lock(self), None) }
+        if guard.lock.read_count() == 1 {
+            // * [DONE] Convert read lock into write lock (create `::upgrade`
+            //   method on `QrwLock`.
+            // * [DONE] Return `FutureWriteGuard` which will immediately
+            //   resolve to a `WriteGuard` (or return a `FutureUpgrade`).
+            guard.lock.upgrade_write_lock();
+            unsafe { FutureUpgrade::new(extract_lock(guard), None) }
         } else {
-            // * [DONE] Return a `FutureWriteGuard` (or `FutureUgrade`) which will
-            //   wait until the read count == 1.
+            // * [DONE] Return a `FutureWriteGuard` (or `FutureUgrade`) which
+            //   will wait until the read count == 1.
             //   * This must be triggered by `::release_read_lock`.
 
             if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
                 ::std::thread::current().name().unwrap_or("<unnamed>")); }
             let (tx, rx) = oneshot::channel();
-            debug_assert_eq!(self.lock.inner.state.load(Acquire) & PROCESSING, PROCESSING);
-            unsafe { (*self.lock.inner.upgrade_tx.get()) = Some(tx); }
-            unsafe { FutureUpgrade::new(extract_lock(self), Some(rx)) }
+            debug_assert_eq!(guard.lock.inner.state.load(Acquire) & PROCESSING, PROCESSING);
+            unsafe { (*guard.lock.inner.upgrade_tx.get()) = Some(tx); }
+            unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
         }
     }
 
     /// Releases the lock held by this `ReadGuard` and returns the original `QrwLock`.
-    pub fn release(self) -> QrwLock<T> {
+    pub fn release(guard: ReadGuard<T>) -> QrwLock<T> {
         unsafe { 
-            self.lock.release_read_lock();
-            extract_lock(self)
+            guard.lock.release_read_lock();
+            extract_lock(guard)
         }
     }
 }
@@ -122,22 +124,23 @@ pub struct WriteGuard<T> {
 impl<T> WriteGuard<T> {
     /// Converts this `WriteGuard` into a `ReadGuard` and fulfills any other
     /// pending read requests.
-    pub fn downgrade(self) -> ReadGuard<T> {        
+    pub fn downgrade(guard: WriteGuard<T>) -> ReadGuard<T> {        
         unsafe { 
-            self.lock.downgrade_write_lock(); 
-            ReadGuard { lock: extract_lock(self) }
+            guard.lock.downgrade_write_lock(); 
+            ReadGuard { lock: extract_lock(guard) }
         }
     }
 
-    /// Releases the lock held by this `WriteGuard` and returns the original `QrwLock`.
+    /// Releases the lock held by this `WriteGuard` and returns the original
+    /// `QrwLock`.
     //
     // * TODO: Create a test that ensures the write lock is released.
     //   Commenting out the `release_write_lock()' line appears to have no
     //   effect on the outcome of the current tests.
-    pub fn release(self) -> QrwLock<T> {
+    pub fn release(guard: WriteGuard<T>) -> QrwLock<T> {
         unsafe {             
-            self.lock.release_write_lock();
-            extract_lock(self)
+            guard.lock.release_write_lock();
+            extract_lock(guard)
         }
     }
 }
@@ -738,7 +741,7 @@ mod tests {
             .and_then(|guard| {
                 assert_eq!(*guard, 0);
                 println!("val[r0]: {}", *guard);
-                guard.release();
+                ReadGuard::release(guard);
 
                 future_r0_a.and_then(|guard| {
                         assert_eq!(*guard, 0);
@@ -801,7 +804,7 @@ mod tests {
 
             let future_write = future_write_guard.and_then(|mut guard| {
                 *guard += 1;
-                guard.downgrade();
+                WriteGuard::downgrade(guard);
                 Ok(())
             });
 
