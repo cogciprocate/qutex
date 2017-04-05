@@ -1,4 +1,4 @@
-//! A queue-backed exclusive data lock.
+//! A queue-backed read/write data lock.
 //
 // * It is unclear how many of the unsafe methods within need actually remain
 //   unsafe.
@@ -627,8 +627,6 @@ impl<T> QrwLock<T> {
                 0 => panic!("Unable to upgrade this QrwLock: no read locks."),
                 WRITE_LOCKED => panic!("Unable to upgrade this QrwLock: already write locked."),
                 state => {
-                    println!("state: {}", state);
-
                     // If not already being processed...
                     if state & PROCESSING != PROCESSING {
                         debug_assert_eq!(state, self.read_count().unwrap() as usize);
