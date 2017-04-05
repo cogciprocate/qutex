@@ -1,4 +1,8 @@
 //! A queue-backed read/write data lock.
+//!
+//! As with any queue-backed system, deadlocks must be carefully avoided when
+//! interoperating with other queues.
+//!
 //
 // * It is unclear how many of the unsafe methods within need actually remain
 //   unsafe.
@@ -31,16 +35,6 @@ const PROCESSING: usize = 1 << 25;
 const PRINT_DEBUG: bool = false;
 
 
-/// A very forgettable guard.
-trait Guard<T> where Self: ::std::marker::Sized {
-    fn lock(&self) -> &QrwLock<T>;
-
-    unsafe fn forget(self) {
-        ::std::mem::forget(self);
-    }
-}
-
-
 /// Our currently favored thread 'chill out' method used when multiple threads
 /// are attempting to process concurrently.
 #[inline]
@@ -68,6 +62,16 @@ unsafe fn extract_lock<T, G: Guard<T>>(guard: G) -> QrwLock<T> {
 }
 
 
+/// Very forgettable guards.
+trait Guard<T> where Self: ::std::marker::Sized {
+    fn lock(&self) -> &QrwLock<T>;
+
+    unsafe fn forget(self) {
+        ::std::mem::forget(self);
+    }
+}
+
+
 /// Allows read-only access to the data contained within a lock.
 pub struct ReadGuard<T> {
     lock: QrwLock<T>,
@@ -76,23 +80,6 @@ pub struct ReadGuard<T> {
 impl<T> ReadGuard<T> {
     pub fn upgrade(guard: ReadGuard<T>) -> FutureUpgrade<T> {
         debug_assert!(guard.lock.read_count().unwrap() > 0);
-
-        // fn new_future_upgrade<U>(guard: ReadGuard<U>) -> FutureUpgrade<U> {
-        //     if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
-        //         thread::current().name().unwrap_or("<unnamed>")); }
-        //     let (tx, rx) = oneshot::channel();
-        //     unsafe { (*guard.lock.inner.upgrade_tx.get()) = Some(tx); }
-        //     unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
-        // }
-
-        // if guard.lock.read_count() == 1 {
-        //     match guard.lock.upgrade_write_lock() {
-        //         Ok(_) => unsafe { FutureUpgrade::new(extract_lock(guard), None) },
-        //         Err(_) => new_future_upgrade(guard),
-        //     }            
-        // } else {
-        //     new_future_upgrade(guard)            
-        // }
 
         match unsafe { guard.lock.upgrade_read_lock() } {
             Ok(_) => {
@@ -104,9 +91,6 @@ impl<T> ReadGuard<T> {
                 if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
                     thread::current().name().unwrap_or("<unnamed>")); }
 
-                // let (tx, rx) = oneshot::channel();
-
-                // unsafe { (*guard.lock.inner.upgrade_tx.get()) = Some(tx); }
                 unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
             }
         }    
@@ -370,7 +354,11 @@ unsafe impl<T: Send> Send for Inner<T> {}
 unsafe impl<T: Send> Sync for Inner<T> {}
 
 
-/// A lock-free queue-backed read/write data lock.
+/// A queue-backed read/write data lock.
+///
+/// As with any queue-backed system, deadlocks must be carefully avoided when
+/// interoperating with other queues.
+///
 pub struct QrwLock<T> {
     inner: Arc<Inner<T>>,
 }
@@ -480,8 +468,9 @@ impl<T> QrwLock<T> {
                     match req.kind {
                         RequestKind::Read => {
                             state += 1;
-                            if PRINT_DEBUG { println!("Locked for reading (state: {}) (thread: {}) ...", 
-                                state, thread::current().name().unwrap_or("<unnamed>")); }
+                            if PRINT_DEBUG { println!("Locked for reading (state: {}) \
+                                (thread: {}) ...", state, 
+                                thread::current().name().unwrap_or("<unnamed>")); }
 
                             if let Some(RequestKind::Read) = self.peek_request_kind() {                                
                                 continue;
@@ -490,12 +479,11 @@ impl<T> QrwLock<T> {
                             }
                         },
                         RequestKind::Write => {
-                            // self.inner.state.store(WRITE_LOCKED, SeqCst);
-                            // break;
                             debug_assert_eq!(state, 0); 
                             state = WRITE_LOCKED;
-                            if PRINT_DEBUG { println!("Locked for writing (state: {}) (thread: {}) ...", 
-                                state, thread::current().name().unwrap_or("<unnamed>")); }
+                            if PRINT_DEBUG { println!("Locked for writing (state: {}) \
+                                (thread: {}) ...", state, 
+                                thread::current().name().unwrap_or("<unnamed>")); }
                             break;
                         },
                     }
@@ -664,9 +652,14 @@ impl<T> QrwLock<T> {
                     self.inner.state.store(1, SeqCst);
                     break;
                 },
-                state => debug_assert_eq!(state & PROCESSING, PROCESSING),
+                state => {
+                    debug_assert_eq!(state & PROCESSING, PROCESSING);
+                    chill_out();
+                },
             }
         }
+
+        self.process_queue();
     }
 
     /// Decreases the reader count by one and unparks the next requester task
