@@ -11,8 +11,7 @@ documentation = "https://docs.rs/qutex"
 homepage = "https://github.com/cogciprocate/qutex"
 repository = "https://github.com/cogciprocate/qutex"
 readme = "README.md"
-keywords = ["futures", "mutex", "lock", "rwlock", "async", "data-structures", "data-structure", 
-	"queue", "container", "concurrency"]
+keywords = ["futures", "async", "data-structures", "container", "concurrency"]
 categories = ["Asynchronous", "Concurrency", "Data structures"]
 
 [dependencies]
