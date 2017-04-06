@@ -12,7 +12,7 @@ homepage = "https://github.com/cogciprocate/qutex"
 repository = "https://github.com/cogciprocate/qutex"
 readme = "README.md"
 keywords = ["futures", "async", "data-structures", "container", "concurrency"]
-categories = ["asynchronous", "concurrency", "data structures"]
+categories = ["asynchronous", "concurrency", "data-structures"]
 
 [dependencies]
 crossbeam = "0.2"

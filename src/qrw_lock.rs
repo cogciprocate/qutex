@@ -198,6 +198,12 @@ impl<T> FutureUpgrade<T> {
             rx: rx,
         }
     }
+
+    /// Blocks the current thread until this future resolves.
+    #[inline]
+    pub fn wait(self) -> Result<WriteGuard<T>, Canceled> {
+        <Self as Future>::wait(self)
+    }
 }
 
 impl<T> Future for FutureUpgrade<T> {
