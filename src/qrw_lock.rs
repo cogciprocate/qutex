@@ -720,8 +720,15 @@ impl<T> QrwLock<T> {
         if PRINT_DEBUG { println!("Releasing write lock...(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
 
-        // Ensure we are write locked and are not processing or read locked:
-        debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
+        // If we are not WRITE_LOCKED, we must be PROCESSING (and will soon be
+        // write locked).
+        debug_assert!({
+            let state = self.inner.state.load(SeqCst);
+            (state & PROCESSING == PROCESSING) == (state & WRITE_LOCKED != WRITE_LOCKED) ||
+            (state & PROCESSING == PROCESSING) && (state & WRITE_LOCKED == WRITE_LOCKED)
+        });
+
+        // Ensure we are not read locked.
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK == 0);
 
         loop {
