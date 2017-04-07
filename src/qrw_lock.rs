@@ -24,7 +24,7 @@ use std::sync::atomic::Ordering::{SeqCst, Acquire, /*Release*/};
 use std::cell::UnsafeCell;
 use std::thread;
 use futures::{Future, Poll, Canceled, Async};
-use futures::sync::oneshot;
+use futures::sync::oneshot::{self, Sender, Receiver};
 use crossbeam::sync::SegQueue;
 
 
@@ -73,6 +73,7 @@ trait Guard<T> where Self: ::std::marker::Sized {
 
 
 /// Allows read-only access to the data contained within a lock.
+#[derive(Debug)]
 pub struct ReadGuard<T> {
     lock: QrwLock<T>,
 }
@@ -127,6 +128,7 @@ impl<T> Guard<T> for ReadGuard<T> {
 
 
 /// Allows read or write access to the data contained within a lock.
+#[derive(Debug)]
 pub struct WriteGuard<T> {
     lock: QrwLock<T>,
 }
@@ -184,15 +186,16 @@ impl<T> Guard<T> for WriteGuard<T> {
 
 /// A precursor to a `WriteGuard`.
 #[must_use = "futures do nothing unless polled"]
+#[derive(Debug)]
 pub struct FutureUpgrade<T> {
     lock: Option<QrwLock<T>>,
     // Designates whether or not to resolve immediately:
-    rx: Option<oneshot::Receiver<()>>,
+    rx: Option<Receiver<()>>,
 }
 
 impl<T> FutureUpgrade<T> {
     /// Returns a new `FutureUpgrade`.
-    fn new(lock: QrwLock<T>, rx: Option<oneshot::Receiver<()>>) -> FutureUpgrade<T> {
+    fn new(lock: QrwLock<T>, rx: Option<Receiver<()>>) -> FutureUpgrade<T> {
         FutureUpgrade {
             lock: Some(lock),
             rx: rx,
@@ -231,14 +234,15 @@ impl<T> Future for FutureUpgrade<T> {
 
 /// A future which resolves to a `ReadGuard`.
 #[must_use = "futures do nothing unless polled"]
+#[derive(Debug)]
 pub struct FutureReadGuard<T> {
     lock: Option<QrwLock<T>>,
-    rx: oneshot::Receiver<()>,
+    rx: Receiver<()>,
 }
 
 impl<T> FutureReadGuard<T> {
     /// Returns a new `FutureReadGuard`.
-    fn new(lock: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureReadGuard<T> {
+    fn new(lock: QrwLock<T>, rx: Receiver<()>) -> FutureReadGuard<T> {
         FutureReadGuard {
             lock: Some(lock),
             rx: rx,
@@ -270,14 +274,15 @@ impl<T> Future for FutureReadGuard<T> {
 
 /// A future which resolves to a `WriteGuard`.
 #[must_use = "futures do nothing unless polled"]
+#[derive(Debug)]
 pub struct FutureWriteGuard<T> {
     lock: Option<QrwLock<T>>,
-    rx: oneshot::Receiver<()>,
+    rx: Receiver<()>,
 }
 
 impl<T> FutureWriteGuard<T> {
     /// Returns a new `FutureWriteGuard`.
-    fn new(lock: QrwLock<T>, rx: oneshot::Receiver<()>) -> FutureWriteGuard<T> {
+    fn new(lock: QrwLock<T>, rx: Receiver<()>) -> FutureWriteGuard<T> {
         FutureWriteGuard {
             lock: Some(lock),
             rx: rx,
@@ -318,13 +323,13 @@ pub enum RequestKind {
 /// A request to lock the lock for either read or write access.
 #[derive(Debug)]
 pub struct QrwRequest {
-    tx: oneshot::Sender<()>,
+    tx: Sender<()>,
     kind: RequestKind,
 }
 
 impl QrwRequest {
     /// Returns a new `QrwRequest`.
-    pub fn new(tx: oneshot::Sender<()>, kind: RequestKind) -> QrwRequest {
+    pub fn new(tx: Sender<()>, kind: RequestKind) -> QrwRequest {
         QrwRequest { 
             tx: tx,
             kind: kind,
@@ -334,13 +339,14 @@ impl QrwRequest {
 
 
 /// The guts of a `QrwLock`.
+#[derive(Debug)]
 struct Inner<T> {
     // TODO: Convert to `AtomicBool` if no additional states are needed:
     state: AtomicUsize,
     cell: UnsafeCell<T>,
     queue: SegQueue<QrwRequest>,
     tip: UnsafeCell<Option<QrwRequest>>,
-    upgrade_tx: UnsafeCell<Option<oneshot::Sender<()>>>,
+    upgrade_tx: UnsafeCell<Option<Sender<()>>>,
 }
 
 impl<T> From<T> for Inner<T> {
@@ -365,6 +371,7 @@ unsafe impl<T: Send> Sync for Inner<T> {}
 /// As with any queue-backed system, deadlocks must be carefully avoided when
 /// interoperating with other queues.
 ///
+#[derive(Debug)]
 pub struct QrwLock<T> {
     inner: Arc<Inner<T>>,
 }
@@ -612,7 +619,7 @@ impl<T> QrwLock<T> {
     /// Do not call this method directly unless you are using a custom guard
     /// or are otherwise managing the lock state manually. Use
     /// `ReadGuard::upgrade` instead.
-    pub unsafe fn upgrade_read_lock(&self) -> Result<(), oneshot::Receiver<()>> {
+    pub unsafe fn upgrade_read_lock(&self) -> Result<(), Receiver<()>> {
         if PRINT_DEBUG { println!("Upgrading reader to writer: (thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
 

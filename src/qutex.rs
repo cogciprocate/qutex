@@ -10,11 +10,12 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 use std::cell::UnsafeCell;
 use futures::{Future, Poll, Canceled};
-use futures::sync::oneshot;
+use futures::sync::oneshot::{self, Sender, Receiver};
 use crossbeam::sync::SegQueue;
 
 
 /// Allows access to the data contained within a lock just like a mutex guard.
+#[derive(Debug)]
 pub struct Guard<T> {
     qutex: Qutex<T>,
 }
@@ -55,14 +56,15 @@ impl<T> Drop for Guard<T> {
 
 /// A future which resolves to a `Guard`.
 #[must_use = "futures do nothing unless polled"]
+#[derive(Debug)]
 pub struct FutureGuard<T> {
     qutex: Option<Qutex<T>>,
-    rx: oneshot::Receiver<()>,
+    rx: Receiver<()>,
 }
 
 impl<T> FutureGuard<T> {
     /// Returns a new `FutureGuard`.
-    fn new(qutex: Qutex<T>, rx: oneshot::Receiver<()>) -> FutureGuard<T> {
+    fn new(qutex: Qutex<T>, rx: Receiver<()>) -> FutureGuard<T> {
         FutureGuard {
             qutex: Some(qutex),
             rx: rx,
@@ -104,17 +106,17 @@ impl<T> Future for FutureGuard<T> {
 /// A request to lock the qutex for exclusive access.
 #[derive(Debug)]
 pub struct Request {
-    tx: oneshot::Sender<()>,
+    tx: Sender<()>,
 }
 
 impl Request {
     /// Returns a new `Request`.
-    pub fn new(tx: oneshot::Sender<()>) -> Request {
+    pub fn new(tx: Sender<()>) -> Request {
         Request { tx: tx }
     }
 }
 
-
+#[derive(Debug)]
 struct Inner<T> {
     // TODO: Convert to `AtomicBool` if no additional states are needed:
     state: AtomicUsize,
@@ -138,6 +140,7 @@ unsafe impl<T: Send> Sync for Inner<T> {}
 
 
 /// A lock-free-queue-backed exclusive data lock.
+#[derive(Debug)]
 pub struct Qutex<T> {
     inner: Arc<Inner<T>>,
 }
