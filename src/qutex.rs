@@ -22,13 +22,11 @@ pub struct Guard<T> {
 
 impl<T> Guard<T> {
     /// Releases the lock held by a `Guard` and returns the original `Qutex`.
-    //
-    // NOTE: This increments the `Qutex` reference count before immediately
-    // decrementing it. Is it worth avoiding this by wrapping it in an Option
-    // or using unsafe hackery? It would make uglier code for the measly
-    // savings of two atomic stores...
     pub fn unlock(guard: Guard<T>) -> Qutex<T> {
-        guard.qutex.clone()
+        // guard.qutex.clone()
+        let qutex = unsafe { ::std::ptr::read(&guard.qutex) };
+        ::std::mem::forget(guard);
+        qutex
     }
 }
 

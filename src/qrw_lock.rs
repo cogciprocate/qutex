@@ -13,7 +13,8 @@
 // * Evaluate whether or not sleeping when the lock is contended (`CONTENDED`
 //   bit) is the best approach. This may be slower than it needs to be when
 //   multiple cores are concurrently attempting to access. Use
-//   `thread::yield_now()` instead? Spin a few times first? Whatever.
+//   `thread::yield_now()` instead? Spin a few times first? Whatever. [UPDATE:
+//   Doing some spinning now]
 //
 
 
@@ -36,7 +37,7 @@ const PRINT_DEBUG: bool = false;
 
 
 /// Our currently favored thread 'chill out' method used when multiple threads
-/// are attempting to process concurrently.
+/// are attempting to contend concurrently.
 #[inline]
 fn chill_out() {
     // thread::sleep(::std::time::Duration::new(0, 1));
@@ -388,7 +389,23 @@ impl<T> QrwLock<T> {
     /// Returns a new `FutureReadGuard` which can be used as a future and will
     /// resolve into a `ReadGuard`.
     #[inline]
+    #[deprecated(since="0.0.9", note="please use `::read` instead")]
     pub fn request_read(self) -> FutureReadGuard<T> {
+        self.read()
+    }
+
+    /// Returns a new `FutureWriteGuard` which can be used as a future and will
+    /// resolve into a `WriteGuard`.
+    #[inline]
+    #[deprecated(since="0.0.9", note="please use `::write` instead")]
+    pub fn request_write(self) -> FutureWriteGuard<T> {
+        self.write()
+    }
+
+    /// Returns a new `FutureReadGuard` which can be used as a future and will
+    /// resolve into a `ReadGuard`.
+    #[inline]
+    pub fn read(self) -> FutureReadGuard<T> {
         if PRINT_DEBUG { println!("Requesting read lock.(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
         let (tx, rx) = oneshot::channel();
@@ -399,7 +416,7 @@ impl<T> QrwLock<T> {
     /// Returns a new `FutureWriteGuard` which can be used as a future and will
     /// resolve into a `WriteGuard`.
     #[inline]
-    pub fn request_write(self) -> FutureWriteGuard<T> {
+    pub fn write(self) -> FutureWriteGuard<T> {
         if PRINT_DEBUG { println!("Requesting write lock.(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
         let (tx, rx) = oneshot::channel();
@@ -775,8 +792,8 @@ mod tests {
     fn simple() {
         let lock = QrwLock::from(0i32);
 
-        let (future_r0_a, future_r0_b) = (lock.clone().request_read(), lock.clone().request_read());
-        let future_r0 = lock.clone().request_read().and_then(|guard| {
+        let (future_r0_a, future_r0_b) = (lock.clone().read(), lock.clone().read());
+        let future_r0 = lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 0);
             println!("val[r0]: {}", *guard);
             ReadGuard::release(guard);
@@ -796,25 +813,25 @@ mod tests {
             Ok(())
         }).boxed();
 
-        let future_w0 = lock.clone().request_write().and_then(|mut guard| {
+        let future_w0 = lock.clone().write().and_then(|mut guard| {
             *guard = 5;
             println!("val is now: {}", *guard);
             Ok(())
         }).boxed();
 
-        let future_r1 = lock.clone().request_read().and_then(|guard| {
+        let future_r1 = lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 5);
             println!("val[r1]: {}", *guard);
             Ok(())
         }).boxed();
 
-        let future_r2 = lock.clone().request_read().and_then(|guard| {
+        let future_r2 = lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 5);
             println!("val[r2]: {}", *guard);
             Ok(())
         }).boxed();
 
-        let future_u0 = lock.clone().request_read().and_then(|read_guard| {
+        let future_u0 = lock.clone().read().and_then(|read_guard| {
             println!("Upgrading read guard...");
             ReadGuard::upgrade(read_guard).and_then(|mut write_guard| {
                 println!("Read guard upgraded.");
@@ -825,7 +842,7 @@ mod tests {
 
         // This read will take place before the above read lock can be
         // upgraded because read requests are processed in a chained fashion:
-        let future_r3 = lock.clone().request_read().and_then(|guard| {
+        let future_r3 = lock.clone().read().and_then(|guard| {
             // Value should not yet be affected by the events following the
             // above write guard upgrade.
             assert_eq!(*guard, 5);
@@ -838,7 +855,7 @@ mod tests {
         let futures = vec![future_r0, future_w0, future_r1, future_r2, future_u0, future_r3];
         future::join_all(futures).wait().unwrap();
 
-        let future_guard = lock.clone().request_read();
+        let future_guard = lock.clone().read();
         let guard = future_guard.wait().unwrap();
         assert_eq!(*guard, 6);
     }
@@ -856,8 +873,8 @@ mod tests {
         let mut threads = Vec::with_capacity(thread_count);
 
         for _i in 0..thread_count {
-            let future_write_guard = lock.clone().request_write();
-            let future_read_guard = lock.clone().request_read();
+            let future_write_guard = lock.clone().write();
+            let future_read_guard = lock.clone().read();
 
             let future_write = future_write_guard.and_then(|mut guard| {
                 *guard += 1;
@@ -876,14 +893,14 @@ mod tests {
         }
 
         for i in 0..thread_count {
-            let future_write_guard = lock.clone().request_write();
+            let future_write_guard = lock.clone().write();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
                 let mut guard = future_write_guard.wait().unwrap();
                 *guard -= 1
             }).unwrap());
 
-            let future_read_guard = lock.clone().request_read();
+            let future_read_guard = lock.clone().read();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
                 let _val = *future_read_guard.wait().unwrap();
@@ -894,7 +911,7 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = lock.clone().request_read().wait().unwrap();
+        let guard = lock.clone().read().wait().unwrap();
         assert_eq!(*guard, start_val);
     }
 }
