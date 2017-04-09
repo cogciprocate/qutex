@@ -154,7 +154,7 @@ impl<T> Qutex<T> {
 
     /// Returns a new `FutureGuard` which can be used as a future and will
     /// resolve into a `Guard`.
-    pub fn request_lock(self) -> FutureGuard<T> {
+    pub fn lock(self) -> FutureGuard<T> {
         let (tx, rx) = oneshot::channel();
         unsafe { self.push_request(Request::new(tx)); }
         FutureGuard::new(self, rx)
@@ -278,21 +278,21 @@ mod tests {
 
         println!("Reading val...");
         {
-            let future_guard = val.clone().request_lock();
+            let future_guard = val.clone().lock();
             let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
 
         println!("Storing new val...");
         {
-            let future_guard = val.clone().request_lock();
+            let future_guard = val.clone().lock();
             let mut guard = future_guard.wait().unwrap();
             *guard = 5;
         }
 
         println!("Reading val...");
         {
-            let future_guard = val.clone().request_lock();
+            let future_guard = val.clone().lock();
             let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
@@ -308,7 +308,7 @@ mod tests {
         let qutex = Qutex::new(start_val);
 
         for i in 0..thread_count {
-            let future_guard = qutex.clone().request_lock();
+            let future_guard = qutex.clone().lock();
 
             let future_write = future_guard.and_then(|mut guard| {
                 *guard += 1;
@@ -322,7 +322,7 @@ mod tests {
         }
 
         for i in 0..thread_count {
-            let future_guard = qutex.clone().request_lock();
+            let future_guard = qutex.clone().lock();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i + thread_count)).spawn(|| {
                 let mut guard = future_guard.wait().unwrap();
@@ -334,7 +334,7 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = qutex.clone().request_lock().wait().unwrap();
+        let guard = qutex.clone().lock().wait().unwrap();
         assert_eq!(*guard, start_val);
     }
 }

@@ -2,7 +2,7 @@
 //! single-thread-optimized, which use Rust futures instead of
 //! thread-blocking.
 //!
-//! [![](https://img.shields.io/badge/github-qutex-blue.svg)][repo]
+//! [![](https://img.shields.io/badge/github-qutex-blue.svg)][repo] [![](http://meritbadge.herokuapp.com/qutex)](https://crates.io/crates/qutex)
 //!
 //! [repo]: https://github.com/cogciprocate/qutex
 
