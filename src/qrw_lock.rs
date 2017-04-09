@@ -10,7 +10,7 @@
 //   from simplifying refactoring.
 //   - Locking for processing, looping, and resetting the processing flag all
 //     need to be standardized (factored out).
-// * Evaluate whether or not sleeping when the lock is contended (`PROCESSING`
+// * Evaluate whether or not sleeping when the lock is contended (`CONTENDED`
 //   bit) is the best approach. This may be slower than it needs to be when
 //   multiple cores are concurrently attempting to access. Use
 //   `thread::yield_now()` instead? Spin a few times first? Whatever.
@@ -19,7 +19,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{fence, AtomicUsize};
 use std::sync::atomic::Ordering::{SeqCst, Acquire, /*Release*/};
 use std::cell::UnsafeCell;
 use std::thread;
@@ -30,7 +30,7 @@ use crossbeam::sync::SegQueue;
 
 const READ_COUNT_MASK: usize = 0x00FFFFFF;
 const WRITE_LOCKED: usize = 1 << 24;
-const PROCESSING: usize = 1 << 25;
+const CONTENDED: usize = 1 << 25;
 
 const PRINT_DEBUG: bool = false;
 
@@ -387,6 +387,7 @@ impl<T> QrwLock<T> {
 
     /// Returns a new `FutureReadGuard` which can be used as a future and will
     /// resolve into a `ReadGuard`.
+    #[inline]
     pub fn request_read(self) -> FutureReadGuard<T> {
         if PRINT_DEBUG { println!("Requesting read lock.(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
@@ -397,6 +398,7 @@ impl<T> QrwLock<T> {
 
     /// Returns a new `FutureWriteGuard` which can be used as a future and will
     /// resolve into a `WriteGuard`.
+    #[inline]
     pub fn request_write(self) -> FutureWriteGuard<T> {
         if PRINT_DEBUG { println!("Requesting write lock.(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
@@ -446,8 +448,9 @@ impl<T> QrwLock<T> {
     }
 
     /// Pops the next read or write lock request and returns it or `None` if the queue is empty.
+    #[inline]
     fn pop_request(&self) -> Option<QrwRequest> {
-        debug_assert_eq!(self.inner.state.load(Acquire) & PROCESSING, PROCESSING);
+        debug_assert_eq!(self.inner.state.load(Acquire) & CONTENDED, CONTENDED);
 
         unsafe {
             ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop())
@@ -462,14 +465,16 @@ impl<T> QrwLock<T> {
     }
 
     /// Returns the `RequestKind` for the next pending read or write lock request.
+    #[inline]
     fn peek_request_kind(&self) -> Option<RequestKind> {
         unsafe { (*self.inner.tip.get()).as_ref().map(|req| req.kind) }
     }
 
     /// Fulfill a request if possible.
+    #[inline]
     fn fulfill_request(&self, mut state: usize) -> usize {
         loop {
-            debug_assert_eq!(self.inner.state.load(Acquire) & PROCESSING, PROCESSING);
+            debug_assert_eq!(self.inner.state.load(Acquire) & CONTENDED, CONTENDED);
             debug_assert_eq!(self.inner.state.load(Acquire) & WRITE_LOCKED, 0);
 
             if let Some(req) = self.pop_request() {
@@ -509,6 +514,45 @@ impl<T> QrwLock<T> {
         state
     }
 
+    /// Returns the current number of read locks.
+    ///
+    /// Currently used for debug purposes only.
+    #[inline]
+    fn read_count(&self) -> Option<u32> {
+        let state = self.inner.state.load(Acquire);
+        let read_count = state & READ_COUNT_MASK;
+
+        if state & READ_COUNT_MASK == read_count {
+            if PRINT_DEBUG { println!("Read count: {} (thread: {}) ...", read_count,
+                thread::current().name().unwrap_or("<unnamed>")); }
+            Some(read_count as u32)
+        } else {
+            None
+        }
+    }
+
+    /// Acquires exclusive access to the lock state and returns it.
+    #[inline(always)]
+    fn contend(&self) -> usize {
+        if PRINT_DEBUG { println!("Processing state (thread: {}) ...", 
+            thread::current().name().unwrap_or("<unnamed>")); }
+        let mut spins: u32 = 0;
+
+        loop {
+            let state = self.inner.state.fetch_or(CONTENDED, SeqCst);
+            if state & CONTENDED != 0 {
+                if spins >= 16 {
+                    chill_out();
+                } else {
+                    for _ in 0..(2 << spins) { fence(SeqCst); }
+                }
+                spins += 1;
+            } else {
+                return state;
+            }
+        }
+    }
+
     /// Pops the next lock request in the queue if possible.
     ///
     /// If this lock is released, read or write-locks this lock and unparks
@@ -529,82 +573,48 @@ impl<T> QrwLock<T> {
     // * Return proper error type.
     //
     // pub unsafe fn process_queue(&self) -> Result<(), ()> {
+    #[inline]
     pub unsafe fn process_queue(&self) {
         if PRINT_DEBUG { println!("Processing queue (thread: {}) ...", 
-                    thread::current().name().unwrap_or("<unnamed>")); }
-
-        loop {
-            // match self.inner.state.load(SeqCst) {
-            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                // Unlocked:
-                0 => {
-                    if PRINT_DEBUG { println!("Processing queue: Unlocked (thread: {}) ...", 
-                        thread::current().name().unwrap_or("<unnamed>")); }
-                    let new_state = self.fulfill_request(0);
-                    self.inner.state.store(new_state, SeqCst);
-                    break;
-                },
-
-                // Write locked, unset PROCESSING flag:
-                WRITE_LOCKED => {
-                    if PRINT_DEBUG { println!("Processing queue: Write Locked (thread: {}) ...", 
-                        thread::current().name().unwrap_or("<unnamed>")); }
-                    self.inner.state.store(WRITE_LOCKED, SeqCst);
-                    break;
-                },
-
-                // Either read locked or already being processed:
-                state => {
-                    if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }} \
-                        (thread: {}) ...", state, self.peek_request_kind(), 
-                        thread::current().name().unwrap_or("<unnamed>")); }
-
-                    // Ensure that if WRITE_LOCKED is set, PROCESSING is also set.
-                    debug_assert!(
-                        (state & PROCESSING == PROCESSING) == (state & WRITE_LOCKED == WRITE_LOCKED) ||
-                        (state & PROCESSING == PROCESSING) && !(state & WRITE_LOCKED == WRITE_LOCKED)
-                    );
-
-                    // If not already being processed, check for additional readers:
-                    if state & PROCESSING != PROCESSING {
-                        debug_assert!(state <= READ_COUNT_MASK);
-
-                        if self.peek_request_kind() == Some(RequestKind::Read) {
-                            // We are read locked and the next request is a read.
-                            let new_state = self.fulfill_request(state);
-                            self.inner.state.store(new_state, SeqCst);
-                        } else {
-                            // Either the next request is empty or a write and
-                            // we are already read locked. Leave the request
-                            // there and restore our original state, removing
-                            // the PROCESSING flag.
-                            self.inner.state.store(state, SeqCst);
-                        }
-
-                        break;
-                    } else {
-                        // If already being processed or the next request is a write
-                        // request, sleep:
-                        chill_out();
-                    }                    
-                },
-            }
-        }
-    }
-
-    /// Returns the current number of read locks.
-    ///
-    /// Currently used for debug purposes only.
-    fn read_count(&self) -> Option<u32> {
-        let state = self.inner.state.load(Acquire);
-        let read_count = state & READ_COUNT_MASK;
-
-        if state & READ_COUNT_MASK == read_count {
-            if PRINT_DEBUG { println!("Read count: {} (thread: {}) ...", read_count,
                 thread::current().name().unwrap_or("<unnamed>")); }
-            Some(read_count as u32)
-        } else {
-            None
+
+        match self.contend() {
+            // Unlocked:
+            0 => {
+                if PRINT_DEBUG { println!("Processing queue: Unlocked (thread: {}) ...", 
+                    thread::current().name().unwrap_or("<unnamed>")); }
+                let new_state = self.fulfill_request(0);
+                self.inner.state.store(new_state, SeqCst);
+            },
+
+            // Write locked, unset CONTENDED flag:
+            WRITE_LOCKED => {
+                if PRINT_DEBUG { println!("Processing queue: Write Locked (thread: {}) ...", 
+                    thread::current().name().unwrap_or("<unnamed>")); }
+                self.inner.state.store(WRITE_LOCKED, SeqCst);
+            },
+
+            // Either read locked or already being processed:
+            state => {
+                debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
+                debug_assert!(state <= READ_COUNT_MASK);
+
+                if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }} \
+                    (thread: {}) ...", state, self.peek_request_kind(), 
+                    thread::current().name().unwrap_or("<unnamed>")); }                
+
+                if self.peek_request_kind() == Some(RequestKind::Read) {
+                    // We are read locked and the next request is a read.                    
+                    let new_state = self.fulfill_request(state);
+                    self.inner.state.store(new_state, SeqCst);
+                } else {
+                    // Either the next request is empty or a write and
+                    // we are already read locked. Leave the request
+                    // there and restore our original state, removing
+                    // the CONTENDED flag.
+                    self.inner.state.store(state, SeqCst);
+                }                   
+            },
         }
     }
 
@@ -619,57 +629,45 @@ impl<T> QrwLock<T> {
     /// Do not call this method directly unless you are using a custom guard
     /// or are otherwise managing the lock state manually. Use
     /// `ReadGuard::upgrade` instead.
+    #[inline]
     pub unsafe fn upgrade_read_lock(&self) -> Result<(), Receiver<()>> {
         if PRINT_DEBUG { println!("Upgrading reader to writer: (thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
 
-        loop {
-            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                0 => panic!("Unable to upgrade this QrwLock: no read locks."),
-                WRITE_LOCKED => panic!("Unable to upgrade this QrwLock: already write locked."),
-                state => {
-                    // If not already being processed...
-                    if state & PROCESSING != PROCESSING {
-                        debug_assert_eq!(state, self.read_count().unwrap() as usize);
+        match self.contend() {
+            0 => panic!("Unable to upgrade this QrwLock: no read locks."),
+            WRITE_LOCKED => panic!("Unable to upgrade this QrwLock: already write locked."),
+            state => {
+                debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
+                debug_assert_eq!(state, self.read_count().unwrap() as usize);
 
-                        if state == 1 { 
-                            self.inner.state.store(WRITE_LOCKED, SeqCst);
-                            return Ok(())
-                        } else {
-                            let (tx, rx) = oneshot::channel();
-                            // unsafe { *self.inner.upgrade_tx.get() = Some(tx); }
-                            *self.inner.upgrade_tx.get() = Some(tx);
-                            self.inner.state.store(state, SeqCst);
-                            return Err(rx);
-                        }
-                    } else {
-                        // If already being processed, sleep:
-                        chill_out();
-                    }                    
-                },
-            }
-        }         
+                if state == 1 { 
+                    self.inner.state.store(WRITE_LOCKED, SeqCst);
+                    Ok(())
+                } else {
+                    let (tx, rx) = oneshot::channel();
+                    *self.inner.upgrade_tx.get() = Some(tx);
+                    self.inner.state.store(state, SeqCst);
+                    Err(rx)
+                }
+            },
+        }
     }
 
     /// Converts a write lock into a read lock then processes the queue,
     /// allowing additional read requests to acquire locks.
     ///
     /// Use `WriteGuard::downgrade` rather than calling this directly.
+    #[inline]
     pub unsafe fn downgrade_write_lock(&self) {
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
 
-        loop {
-            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                0 => unreachable!(),
-                WRITE_LOCKED => {
-                    self.inner.state.store(1, SeqCst);
-                    break;
-                },
-                state => {
-                    debug_assert_eq!(state & PROCESSING, PROCESSING);
-                    chill_out();
-                },
-            }
+        match self.contend() {
+            0 => unreachable!(),
+            WRITE_LOCKED => {
+                self.inner.state.store(1, SeqCst);
+            },
+            _state => unreachable!(),
         }
 
         self.process_queue();
@@ -683,41 +681,32 @@ impl<T> QrwLock<T> {
     //
     // TODO: Consider using `Ordering::Release`.
     // TODO: Wire up upgrade checking (if reader count == 1, complete `upgrade_tx`).
+    #[inline]
     pub unsafe fn release_read_lock(&self) {
         if PRINT_DEBUG { println!("Releasing read lock...(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
-
         // Ensure we are read locked and not processing or write locked:
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK != 0);
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, 0);
 
-        loop {
-            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                0 => unreachable!(),
-                WRITE_LOCKED => unreachable!(),
-                state => {
-                    if state & PROCESSING != PROCESSING {
-                        debug_assert!(state > 0 && state <= READ_COUNT_MASK);
-                        let new_state = state - 1;
-                        
+        match self.contend() {
+            0 => unreachable!(),
+            WRITE_LOCKED => unreachable!(),
+            state => {
+                debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);    
+                assert!(state > 0 && state <= READ_COUNT_MASK);
+                let new_state = state - 1;                
 
-                        // If an upgrade (read lock -> write lock) is pending
-                        // and we have just reached a read lock count of 1:
-                        if new_state == 1 && (*self.inner.upgrade_tx.get()).is_some() {
-                            self.inner.state.store(WRITE_LOCKED, SeqCst);
-                            // Send the upgrade signal. Ignore any errors (if
-                            // the upgrade receiver has dropped):
-                            let tx = (*self.inner.upgrade_tx.get()).take().unwrap();
-                            tx.send(()).ok();
-                        } else {
-                            self.inner.state.store(new_state, SeqCst);
-                        }
-
-                        break;                   
-                    } else {
-                        // If already being processed, sleep:
-                        chill_out();
-                    }
+                // If an upgrade (read lock -> write lock) is pending
+                // and we have just reached a read lock count of 1:
+                if new_state == 1 && (*self.inner.upgrade_tx.get()).is_some() {
+                    self.inner.state.store(WRITE_LOCKED, SeqCst);
+                    // Send the upgrade signal. Ignore any errors (if
+                    // the upgrade receiver has dropped):
+                    let tx = (*self.inner.upgrade_tx.get()).take().unwrap();
+                    tx.send(()).ok();
+                } else {
+                    self.inner.state.store(new_state, SeqCst);
                 }
             }
         }
@@ -729,30 +718,28 @@ impl<T> QrwLock<T> {
     /// possible.
     //
     // TODO: Consider using `Ordering::Release`.
+    #[inline]
     pub unsafe fn release_write_lock(&self) {
         if PRINT_DEBUG { println!("Releasing write lock...(thread: {}) ...", 
             thread::current().name().unwrap_or("<unnamed>")); }
 
-        // If we are not WRITE_LOCKED, we must be PROCESSING (and will soon be
+        // If we are not WRITE_LOCKED, we must be CONTENDED (and will soon be
         // write locked).
         debug_assert!({
             let state = self.inner.state.load(SeqCst);
-            (state & PROCESSING == PROCESSING) == (state & WRITE_LOCKED != WRITE_LOCKED) ||
-            (state & PROCESSING == PROCESSING) && (state & WRITE_LOCKED == WRITE_LOCKED)
+            (state & CONTENDED == CONTENDED) == (state & WRITE_LOCKED != WRITE_LOCKED) ||
+            (state & CONTENDED == CONTENDED) && (state & WRITE_LOCKED == WRITE_LOCKED)
         });
 
         // Ensure we are not read locked.
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK == 0);
 
-        loop {
-            match self.inner.state.fetch_or(PROCESSING, SeqCst) {
-                0 => unreachable!(),
-                WRITE_LOCKED => {
-                    self.inner.state.store(0, SeqCst);
-                    break;
-                },
-                state => debug_assert_eq!(state & PROCESSING, PROCESSING),
-            }
+        match self.contend() {
+            0 => unreachable!(),
+            WRITE_LOCKED => {
+                self.inner.state.store(0, SeqCst);
+            },
+            _state => unreachable!(),
         }
 
         self.process_queue()
