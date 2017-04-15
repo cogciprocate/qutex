@@ -85,22 +85,22 @@ impl<T> ReadGuard<T> {
 
         match unsafe { guard.lock.upgrade_read_lock() } {
             Ok(_) => {
-                if PRINT_DEBUG { println!("Read lock is now upgraded (thread: {}) ...", 
+                if PRINT_DEBUG { println!("Read lock is now upgraded (thread: {}) ...",
                     thread::current().name().unwrap_or("<unnamed>")); }
                 unsafe { FutureUpgrade::new(extract_lock(guard), None) }
             },
             Err(rx) => {
-                if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...", 
+                if PRINT_DEBUG { println!("Waiting for the read count to reach 1 (thread: {}) ...",
                     thread::current().name().unwrap_or("<unnamed>")); }
 
                 unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
             }
-        }    
+        }
     }
 
     /// Releases the lock held by this `ReadGuard` and returns the original `QrwLock`.
     pub fn release(guard: ReadGuard<T>) -> QrwLock<T> {
-        unsafe { 
+        unsafe {
             guard.lock.release_read_lock();
             extract_lock(guard)
         }
@@ -137,9 +137,9 @@ pub struct WriteGuard<T> {
 impl<T> WriteGuard<T> {
     /// Converts this `WriteGuard` into a `ReadGuard` and fulfills any other
     /// pending read requests.
-    pub fn downgrade(guard: WriteGuard<T>) -> ReadGuard<T> {        
-        unsafe { 
-            guard.lock.downgrade_write_lock(); 
+    pub fn downgrade(guard: WriteGuard<T>) -> ReadGuard<T> {
+        unsafe {
+            guard.lock.downgrade_write_lock();
             ReadGuard { lock: extract_lock(guard) }
         }
     }
@@ -151,7 +151,7 @@ impl<T> WriteGuard<T> {
     //   Commenting out the `release_write_lock()' line appears to have no
     //   effect on the outcome of the current tests.
     pub fn release(guard: WriteGuard<T>) -> QrwLock<T> {
-        unsafe {             
+        unsafe {
             guard.lock.release_write_lock();
             extract_lock(guard)
         }
@@ -217,7 +217,7 @@ impl<T> Future for FutureUpgrade<T> {
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
-            if PRINT_DEBUG { println!("Polling FutureUpgrade (thread: {}) ...", 
+            if PRINT_DEBUG { println!("Polling FutureUpgrade (thread: {}) ...",
                 thread::current().name().unwrap_or("<unnamed>")); }
 
             if self.rx.is_none() {
@@ -225,7 +225,7 @@ impl<T> Future for FutureUpgrade<T> {
             } else {
                 unsafe { self.lock.as_ref().unwrap().process_queue() }
                 self.rx.poll().map(|res| res.map(|_| WriteGuard { lock: self.lock.take().unwrap() }))
-            }            
+            }
         } else {
             panic!("FutureUpgrade::poll: Task already completed.");
         }
@@ -331,7 +331,7 @@ pub struct QrwRequest {
 impl QrwRequest {
     /// Returns a new `QrwRequest`.
     pub fn new(tx: Sender<()>, kind: RequestKind) -> QrwRequest {
-        QrwRequest { 
+        QrwRequest {
             tx: tx,
             kind: kind,
         }
@@ -406,7 +406,7 @@ impl<T> QrwLock<T> {
     /// resolve into a `ReadGuard`.
     #[inline]
     pub fn read(self) -> FutureReadGuard<T> {
-        if PRINT_DEBUG { println!("Requesting read lock.(thread: {}) ...", 
+        if PRINT_DEBUG { println!("Requesting read lock.(thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
         let (tx, rx) = oneshot::channel();
         unsafe { self.push_request(QrwRequest::new(tx, RequestKind::Read)); }
@@ -417,7 +417,7 @@ impl<T> QrwLock<T> {
     /// resolve into a `WriteGuard`.
     #[inline]
     pub fn write(self) -> FutureWriteGuard<T> {
-        if PRINT_DEBUG { println!("Requesting write lock.(thread: {}) ...", 
+        if PRINT_DEBUG { println!("Requesting write lock.(thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
         let (tx, rx) = oneshot::channel();
         unsafe { self.push_request(QrwRequest::new(tx, RequestKind::Write)); }
@@ -470,6 +470,7 @@ impl<T> QrwLock<T> {
         debug_assert_eq!(self.inner.state.load(Acquire) & CONTENDED, CONTENDED);
 
         unsafe {
+            // Pop twice if the tip was `None` but the queue was not empty.
             ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop())
                 .or_else(|| {
                     if (*self.inner.tip.get()).is_some() {
@@ -484,7 +485,14 @@ impl<T> QrwLock<T> {
     /// Returns the `RequestKind` for the next pending read or write lock request.
     #[inline]
     fn peek_request_kind(&self) -> Option<RequestKind> {
-        unsafe { (*self.inner.tip.get()).as_ref().map(|req| req.kind) }
+        debug_assert_eq!(self.inner.state.load(Acquire) & CONTENDED, CONTENDED);
+
+        unsafe {
+            if (*self.inner.tip.get()).is_none() {
+                ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop());
+            }
+            (*self.inner.tip.get()).as_ref().map(|req| req.kind)
+        }
     }
 
     /// Fulfill a request if possible.
@@ -504,20 +512,20 @@ impl<T> QrwLock<T> {
                         RequestKind::Read => {
                             state += 1;
                             if PRINT_DEBUG { println!("Locked for reading (state: {}) \
-                                (thread: {}) ...", state, 
+                                (thread: {}) ...", state,
                                 thread::current().name().unwrap_or("<unnamed>")); }
 
-                            if let Some(RequestKind::Read) = self.peek_request_kind() {                                
+                            if let Some(RequestKind::Read) = self.peek_request_kind() {
                                 continue;
                             } else {
                                 break;
                             }
                         },
                         RequestKind::Write => {
-                            debug_assert_eq!(state, 0); 
+                            debug_assert_eq!(state, 0);
                             state = WRITE_LOCKED;
                             if PRINT_DEBUG { println!("Locked for writing (state: {}) \
-                                (thread: {}) ...", state, 
+                                (thread: {}) ...", state,
                                 thread::current().name().unwrap_or("<unnamed>")); }
                             break;
                         },
@@ -551,7 +559,7 @@ impl<T> QrwLock<T> {
     /// Acquires exclusive access to the lock state and returns it.
     #[inline(always)]
     fn contend(&self) -> usize {
-        if PRINT_DEBUG { println!("Processing state (thread: {}) ...", 
+        if PRINT_DEBUG { println!("Processing state (thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
         let mut spins: u32 = 0;
 
@@ -575,7 +583,7 @@ impl<T> QrwLock<T> {
     /// If this lock is released, read or write-locks this lock and unparks
     /// the next requester task in the queue.
     ///
-    /// If this lock is write-locked, this function does nothing. 
+    /// If this lock is write-locked, this function does nothing.
     ///
     /// If this lock is read-locked and the next request or consecutive
     /// requests in the queue are read requests, those requests will be
@@ -583,7 +591,7 @@ impl<T> QrwLock<T> {
     /// read-lock count appropriately.
     ///
     //
-    // TODO: 
+    // TODO:
     // * This is currently public due to 'derivers' (aka. sub-types). Evaluate.
     // * Consider removing unsafe qualifier (should be fine, this fn assumes
     //   no particular state).
@@ -592,13 +600,16 @@ impl<T> QrwLock<T> {
     // pub unsafe fn process_queue(&self) -> Result<(), ()> {
     #[inline]
     pub unsafe fn process_queue(&self) {
-        if PRINT_DEBUG { println!("Processing queue (thread: {}) ...", 
+        if PRINT_DEBUG { println!("Processing queue (thread: {}) ...",
                 thread::current().name().unwrap_or("<unnamed>")); }
+
+        // Do nothing if an upgrade is pending.
+        if (*self.inner.upgrade_tx.get()).is_some() { return; }
 
         match self.contend() {
             // Unlocked:
             0 => {
-                if PRINT_DEBUG { println!("Processing queue: Unlocked (thread: {}) ...", 
+                if PRINT_DEBUG { println!("Processing queue: Unlocked (thread: {}) ...",
                     thread::current().name().unwrap_or("<unnamed>")); }
                 let new_state = self.fulfill_request(0);
                 self.inner.state.store(new_state, SeqCst);
@@ -606,7 +617,7 @@ impl<T> QrwLock<T> {
 
             // Write locked, unset CONTENDED flag:
             WRITE_LOCKED => {
-                if PRINT_DEBUG { println!("Processing queue: Write Locked (thread: {}) ...", 
+                if PRINT_DEBUG { println!("Processing queue: Write Locked (thread: {}) ...",
                     thread::current().name().unwrap_or("<unnamed>")); }
                 self.inner.state.store(WRITE_LOCKED, SeqCst);
             },
@@ -617,11 +628,11 @@ impl<T> QrwLock<T> {
                 debug_assert!(state <= READ_COUNT_MASK);
 
                 if PRINT_DEBUG { println!("Processing queue: Other {{ state: {}, peek: {:?} }} \
-                    (thread: {}) ...", state, self.peek_request_kind(), 
-                    thread::current().name().unwrap_or("<unnamed>")); }                
+                    (thread: {}) ...", state, self.peek_request_kind(),
+                    thread::current().name().unwrap_or("<unnamed>")); }
 
                 if self.peek_request_kind() == Some(RequestKind::Read) {
-                    // We are read locked and the next request is a read.                    
+                    // We are read locked and the next request is a read.
                     let new_state = self.fulfill_request(state);
                     self.inner.state.store(new_state, SeqCst);
                 } else {
@@ -630,7 +641,7 @@ impl<T> QrwLock<T> {
                     // there and restore our original state, removing
                     // the CONTENDED flag.
                     self.inner.state.store(state, SeqCst);
-                }                   
+                }
             },
         }
     }
@@ -648,7 +659,7 @@ impl<T> QrwLock<T> {
     /// `ReadGuard::upgrade` instead.
     #[inline]
     pub unsafe fn upgrade_read_lock(&self) -> Result<(), Receiver<()>> {
-        if PRINT_DEBUG { println!("Upgrading reader to writer: (thread: {}) ...", 
+        if PRINT_DEBUG { println!("Upgrading reader to writer: (thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
 
         match self.contend() {
@@ -658,7 +669,7 @@ impl<T> QrwLock<T> {
                 debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
                 debug_assert_eq!(state, self.read_count().unwrap() as usize);
 
-                if state == 1 { 
+                if state == 1 {
                     self.inner.state.store(WRITE_LOCKED, SeqCst);
                     Ok(())
                 } else {
@@ -700,7 +711,7 @@ impl<T> QrwLock<T> {
     // TODO: Wire up upgrade checking (if reader count == 1, complete `upgrade_tx`).
     #[inline]
     pub unsafe fn release_read_lock(&self) {
-        if PRINT_DEBUG { println!("Releasing read lock...(thread: {}) ...", 
+        if PRINT_DEBUG { println!("Releasing read lock...(thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
         // Ensure we are read locked and not processing or write locked:
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK != 0);
@@ -710,9 +721,9 @@ impl<T> QrwLock<T> {
             0 => unreachable!(),
             WRITE_LOCKED => unreachable!(),
             state => {
-                debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);    
+                debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
                 assert!(state > 0 && state <= READ_COUNT_MASK);
-                let new_state = state - 1;                
+                let new_state = state - 1;
 
                 // If an upgrade (read lock -> write lock) is pending
                 // and we have just reached a read lock count of 1:
@@ -737,7 +748,7 @@ impl<T> QrwLock<T> {
     // TODO: Consider using `Ordering::Release`.
     #[inline]
     pub unsafe fn release_write_lock(&self) {
-        if PRINT_DEBUG { println!("Releasing write lock...(thread: {}) ...", 
+        if PRINT_DEBUG { println!("Releasing write lock...(thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
 
         // If we are not WRITE_LOCKED, we must be CONTENDED (and will soon be
@@ -786,7 +797,7 @@ impl<T> Clone for QrwLock<T> {
 mod tests {
     use std::thread;
     use futures::future;
-    use super::*;    
+    use super::*;
 
     #[test]
     fn simple() {
@@ -859,8 +870,8 @@ mod tests {
         let guard = future_guard.wait().unwrap();
         assert_eq!(*guard, 6);
     }
-    
-    // This doesn't really prove much... 
+
+    // This doesn't really prove much...
     //
     // * TODO: *Actually* determine whether or not the lock acquisition order is
     //   upheld.
@@ -869,7 +880,7 @@ mod tests {
     fn concurrent() {
         let start_val = 0i32;
         let lock = QrwLock::new(start_val);
-        let thread_count = 20;        
+        let thread_count = 20;
         let mut threads = Vec::with_capacity(thread_count);
 
         for _i in 0..thread_count {
@@ -889,7 +900,7 @@ mod tests {
 
             threads.push(thread::spawn(|| {
                 future_write.join(future_read).wait().unwrap();
-            }));        
+            }));
         }
 
         for i in 0..thread_count {
