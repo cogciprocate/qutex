@@ -691,11 +691,11 @@ impl<T> QrwLock<T> {
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
 
         match self.contend() {
-            0 => unreachable!(),
+            0 => debug_assert!(false, "unreachable"),
             WRITE_LOCKED => {
                 self.inner.state.store(1, SeqCst);
             },
-            _state => unreachable!(),
+            _state => debug_assert!(false, "unreachable"),
         }
 
         self.process_queue();
@@ -718,8 +718,8 @@ impl<T> QrwLock<T> {
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, 0);
 
         match self.contend() {
-            0 => unreachable!(),
-            WRITE_LOCKED => unreachable!(),
+            0 => debug_assert!(false, "unreachable"),
+            WRITE_LOCKED => debug_assert!(false, "unreachable"),
             state => {
                 debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
                 assert!(state > 0 && state <= READ_COUNT_MASK);
@@ -763,11 +763,11 @@ impl<T> QrwLock<T> {
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK == 0);
 
         match self.contend() {
-            0 => unreachable!(),
+            0 => debug_assert!(false, "unreachable"),
             WRITE_LOCKED => {
                 self.inner.state.store(0, SeqCst);
             },
-            _state => unreachable!(),
+            _state => debug_assert!(false, "unreachable"),
         }
 
         self.process_queue()
