@@ -83,9 +83,9 @@ impl<T> Future for FutureGuard<T> {
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.qutex.is_some() {
-            unsafe { 
+            unsafe {
                 self.qutex.as_ref().unwrap().process_queue()
-                    // .expect("Error polling FutureGuard"); 
+                    // .expect("Error polling FutureGuard");
             }
 
             match self.rx.poll() {
@@ -183,8 +183,6 @@ impl<T> Qutex<T> {
 
     /// Returns a reference to the inner value.
     ///
-    /// This is fraught with potential peril.
-    ///
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         self.inner.cell.get()
@@ -192,16 +190,15 @@ impl<T> Qutex<T> {
 
     /// Returns a mutable reference to the inner value.
     ///
-    /// Drinking water from the tap in 1850's London would be safer.
-    ///
     #[inline]
     pub fn as_mut_ptr(&self) -> *mut T {
         self.inner.cell.get()
     }
 
-    /// Pops the next lock request in the queue if this lock is unlocked.
+    /// Pops the next lock request in the queue if this (the caller's) lock is
+    /// unlocked.
     //
-    // TODO: 
+    // TODO:
     // * This is currently public due to 'derivers' (aka. sub-types). Evaluate.
     // * Consider removing unsafe qualifier.
     // * Return proper error type.
@@ -236,9 +233,10 @@ impl<T> Qutex<T> {
         }
     }
 
-    /// Unlocks this lock and wakes up the next task in the queue.
+    /// Unlocks this (the caller's) lock and wakes up the next task in the
+    /// queue.
     //
-    // TODO: 
+    // TODO:
     // * Evaluate unsafe-ness.
     // * Return proper error type
     // pub unsafe fn direct_unlock(&self) -> Result<(), ()> {
@@ -297,13 +295,13 @@ mod tests {
             println!("val: {}", *guard);
         }
     }
-    
+
     #[test]
     fn concurrent() {
         use std::thread;
 
-        let thread_count = 20; 
-        let mut threads = Vec::with_capacity(thread_count);        
+        let thread_count = 20;
+        let mut threads = Vec::with_capacity(thread_count);
         let start_val = 0i32;
         let qutex = Qutex::new(start_val);
 
@@ -318,7 +316,7 @@ mod tests {
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
                 future_write.wait().unwrap();
             }).unwrap());
-        
+
         }
 
         for i in 0..thread_count {
@@ -327,7 +325,7 @@ mod tests {
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i + thread_count)).spawn(|| {
                 let mut guard = future_guard.wait().unwrap();
                 *guard -= 1;
-            }).unwrap())            
+            }).unwrap())
         }
 
         for thread in threads {

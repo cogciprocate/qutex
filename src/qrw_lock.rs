@@ -448,16 +448,12 @@ impl<T> QrwLock<T> {
 
     /// Returns a reference to the inner value.
     ///
-    /// This is fraught with potential peril.
-    ///
     #[inline]
     pub fn as_ptr(&self) -> *const T {
         self.inner.cell.get()
     }
 
     /// Returns a mutable reference to the inner value.
-    ///
-    /// Drinking water from the tap in 1850's London would be safer.
     ///
     #[inline]
     pub fn as_mut_ptr(&self) -> *mut T {
@@ -580,16 +576,20 @@ impl<T> QrwLock<T> {
 
     /// Pops the next lock request in the queue if possible.
     ///
-    /// If this lock is released, read or write-locks this lock and unparks
-    /// the next requester task in the queue.
-    ///
-    /// If this lock is write-locked, this function does nothing.
-    ///
-    /// If this lock is read-locked and the next request or consecutive
-    /// requests in the queue are read requests, those requests will be
-    /// fulfilled, unparking their respective tasks and incrementing the
-    /// read-lock count appropriately.
-    ///
+    //
+    // TODO: Clarify the following (or remove):
+    //
+    // If this (the caller's?) lock is released, read or write-locks this lock
+    // and unparks the next requester task in the queue.
+    //
+    // If this (the caller's?) lock is write-locked, this function does
+    // nothing.
+    //
+    // If this (the caller's?) lock is read-locked and the next request or consecutive
+    // requests in the queue are read requests, those requests will be
+    // fulfilled, unparking their respective tasks and incrementing the
+    // read-lock count appropriately.
+    //
     //
     // TODO:
     // * This is currently public due to 'derivers' (aka. sub-types). Evaluate.
@@ -742,8 +742,8 @@ impl<T> QrwLock<T> {
         self.process_queue()
     }
 
-    /// Unlocks this lock and unparks the next requester task in the queue if
-    /// possible.
+    /// Unlocks this (the caller's) lock and unparks the next requester task
+    /// in the queue if possible.
     //
     // TODO: Consider using `Ordering::Release`.
     #[inline]
