@@ -925,4 +925,45 @@ mod tests {
         let guard = lock.clone().read().wait().unwrap();
         assert_eq!(*guard, start_val);
     }
+
+
+    #[test]
+    fn read_write_thread_loop() {
+        let lock = QrwLock::new(vec![0usize; 1 << 13]);
+        let loop_count = 15;
+        let redundancy_count = 700;
+        let mut threads = Vec::with_capacity(loop_count * 2);
+
+        for i in 0..loop_count {
+            let future_write_guard = lock.clone().write();
+            let future_read_guard = lock.clone().read();
+
+            threads.push(thread::Builder::new().name(format!("write_thread_{}", i)).spawn(move || {
+                let mut guard = future_write_guard.wait().unwrap();
+                for _ in 0..redundancy_count {
+                    for idx in guard.iter_mut() {
+                        *idx += 1;
+                    }
+                }
+            }).unwrap());
+
+            threads.push(thread::Builder::new().name(format!("read_thread_{}", i)).spawn(move || {
+                let guard = future_read_guard.wait().unwrap();
+                let expected_val = redundancy_count * (i + 1);
+                for idx in guard.iter() {
+                    assert!(*idx == expected_val, "Lock data mismatch. \
+                        {} expected, {} found.", expected_val, *idx);
+                }
+            }).unwrap());
+        }
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        let guard = lock.clone().read().wait().unwrap();
+        for idx in guard.iter() {
+            assert_eq!(*idx, loop_count * redundancy_count);
+        }
+    }
 }
