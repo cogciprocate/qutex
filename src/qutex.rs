@@ -6,7 +6,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{fence, AtomicUsize};
 use std::sync::atomic::Ordering::SeqCst;
 use std::cell::UnsafeCell;
 use futures::{Future, Poll, Canceled};
@@ -243,6 +243,7 @@ impl<T> Qutex<T> {
     pub unsafe fn direct_unlock(&self) {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
+        fence(SeqCst);
         self.process_queue()
     }
 }

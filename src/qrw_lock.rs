@@ -698,6 +698,7 @@ impl<T> QrwLock<T> {
             _state => debug_assert!(false, "unreachable"),
         }
 
+        fence(SeqCst);
         self.process_queue();
     }
 
@@ -770,6 +771,7 @@ impl<T> QrwLock<T> {
             _state => debug_assert!(false, "unreachable"),
         }
 
+        fence(SeqCst);
         self.process_queue()
     }
 }
