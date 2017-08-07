@@ -90,6 +90,7 @@ impl<T> Future for FutureGuard<T> {
 
             match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| {
+                    // fence(SeqCst);
                     Guard { qutex: self.qutex.take().unwrap() }
                 })),
                 Err(e) => Err(e.into()),
@@ -243,7 +244,7 @@ impl<T> Qutex<T> {
     pub unsafe fn direct_unlock(&self) {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
-        fence(SeqCst);
+        // fence(SeqCst);
         self.process_queue()
     }
 }

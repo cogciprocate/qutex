@@ -221,10 +221,14 @@ impl<T> Future for FutureUpgrade<T> {
                 thread::current().name().unwrap_or("<unnamed>")); }
 
             if self.rx.is_none() {
+                // fence(SeqCst);
                 Ok(Async::Ready(WriteGuard { lock: self.lock.take().unwrap() }))
             } else {
                 unsafe { self.lock.as_ref().unwrap().process_queue() }
-                self.rx.poll().map(|res| res.map(|_| WriteGuard { lock: self.lock.take().unwrap() }))
+                self.rx.poll().map(|res| res.map(|_| {
+                    // fence(SeqCst);
+                    WriteGuard { lock: self.lock.take().unwrap() }
+                }))
             }
         } else {
             panic!("FutureUpgrade::poll: Task already completed.");
@@ -265,7 +269,10 @@ impl<T> Future for FutureReadGuard<T> {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
             unsafe { self.lock.as_ref().unwrap().process_queue() }
-            self.rx.poll().map(|res| res.map(|_| ReadGuard { lock: self.lock.take().unwrap() }))
+            self.rx.poll().map(|res| res.map(|_| {
+                // fence(SeqCst);
+                ReadGuard { lock: self.lock.take().unwrap() }
+            }))
         } else {
             panic!("FutureReadGuard::poll: Task already completed.");
         }
@@ -305,7 +312,10 @@ impl<T> Future for FutureWriteGuard<T> {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
             unsafe { self.lock.as_ref().unwrap().process_queue() }
-            self.rx.poll().map(|res| res.map(|_| WriteGuard { lock: self.lock.take().unwrap() }))
+            self.rx.poll().map(|res| res.map(|_| {
+                // fence(SeqCst);
+                WriteGuard { lock: self.lock.take().unwrap() }
+            }))
         } else {
             panic!("FutureWriteGuard::poll: Task already completed.");
         }
@@ -698,7 +708,7 @@ impl<T> QrwLock<T> {
             _state => debug_assert!(false, "unreachable"),
         }
 
-        fence(SeqCst);
+        // fence(SeqCst);
         self.process_queue();
     }
 
@@ -771,7 +781,7 @@ impl<T> QrwLock<T> {
             _state => debug_assert!(false, "unreachable"),
         }
 
-        fence(SeqCst);
+        // fence(SeqCst);
         self.process_queue()
     }
 }
