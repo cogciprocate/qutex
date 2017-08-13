@@ -6,7 +6,7 @@
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{fence, AtomicUsize};
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 use std::cell::UnsafeCell;
 use futures::{Future, Poll, Canceled};
