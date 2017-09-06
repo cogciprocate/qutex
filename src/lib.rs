@@ -13,5 +13,5 @@ mod qutex;
 mod qrw_lock;
 
 pub use self::qutex::{Guard, FutureGuard, Request, Qutex};
-pub use self::qrw_lock::{ReadGuard, WriteGuard, FutureReadGuard, FutureWriteGuard, 
+pub use self::qrw_lock::{ReadGuard, WriteGuard, FutureReadGuard, FutureWriteGuard,
 	QrwRequest, RequestKind, QrwLock};

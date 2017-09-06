@@ -15,5 +15,5 @@ keywords = ["futures", "async", "data-structures", "container", "concurrency"]
 categories = ["asynchronous", "concurrency", "data-structures"]
 
 [dependencies]
-crossbeam = "0.2"
+crossbeam = "0.3"
 futures = "0.1"
