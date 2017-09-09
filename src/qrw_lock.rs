@@ -357,7 +357,8 @@ struct Inner<T> {
     cell: UnsafeCell<T>,
     queue: SegQueue<QrwRequest>,
     tip: UnsafeCell<Option<QrwRequest>>,
-    upgrade_tx: UnsafeCell<Option<Sender<()>>>,
+    // upgrade_tx: UnsafeCell<Option<Sender<()>>>,
+    upgrade_queue: SegQueue<Sender<()>>,
 }
 
 impl<T> From<T> for Inner<T> {
@@ -368,7 +369,8 @@ impl<T> From<T> for Inner<T> {
             cell: UnsafeCell::new(val),
             queue: SegQueue::new(),
             tip: UnsafeCell::new(None),
-            upgrade_tx: UnsafeCell::new(None),
+            // upgrade_tx: UnsafeCell::new(None),
+            upgrade_queue: SegQueue::new(),
         }
     }
 }
@@ -614,7 +616,8 @@ impl<T> QrwLock<T> {
                 thread::current().name().unwrap_or("<unnamed>")); }
 
         // Do nothing if an upgrade is pending.
-        if (*self.inner.upgrade_tx.get()).is_some() { return; }
+        // if (*self.inner.upgrade_tx.get()).is_some() { return; }
+        if !self.inner.upgrade_queue.is_empty() { return; }
 
         match self.contend() {
             // Unlocked:
@@ -624,14 +627,12 @@ impl<T> QrwLock<T> {
                 let new_state = self.fulfill_request(0);
                 self.inner.state.store(new_state, SeqCst);
             },
-
             // Write locked, unset CONTENDED flag:
             WRITE_LOCKED => {
                 if PRINT_DEBUG { println!("Processing queue: Write Locked (thread: {}) ...",
                     thread::current().name().unwrap_or("<unnamed>")); }
                 self.inner.state.store(WRITE_LOCKED, SeqCst);
             },
-
             // Either read locked or already being processed:
             state => {
                 debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
@@ -653,6 +654,41 @@ impl<T> QrwLock<T> {
                     self.inner.state.store(state, SeqCst);
                 }
             },
+        }
+    }
+
+    /// Enqueues an upgrade.
+    fn enqueue_upgrade(&self, state: usize) -> Receiver<()> {
+        debug_assert!(state > 0 && state & CONTENDED == 0 && state & WRITE_LOCKED == 0);
+        let (tx, rx) = oneshot::channel();
+        self.inner.upgrade_queue.push(tx);
+        self.inner.state.store(state - 1, SeqCst);
+        rx
+    }
+
+    /// Fulfills an upgrade request.
+    fn fulfill_upgrade(&self) {
+        debug_assert!({
+            let state = self.inner.state.load(SeqCst);
+            (state & READ_COUNT_MASK == 1 && state & WRITE_LOCKED == 0) ||
+            (state & READ_COUNT_MASK == 0 && state & WRITE_LOCKED != 0)
+        });
+        debug_assert!(self.inner.state.load(SeqCst) & CONTENDED != 0);
+        debug_assert!(!self.inner.upgrade_queue.is_empty());
+
+        loop {
+            match self.inner.upgrade_queue.try_pop() {
+                Some(tx) => {
+                    match tx.send(()) {
+                        Ok(_) => {
+                            self.inner.state.store(WRITE_LOCKED, SeqCst);
+                            break;
+                        },
+                        Err(()) => continue,
+                    }
+                },
+                None => break,
+            }
         }
     }
 
@@ -680,13 +716,14 @@ impl<T> QrwLock<T> {
                 debug_assert_eq!(state, self.read_count().unwrap() as usize);
 
                 if state == 1 {
-                    self.inner.state.store(WRITE_LOCKED, SeqCst);
-                    Ok(())
+                    if self.inner.upgrade_queue.is_empty() {
+                        self.inner.state.store(WRITE_LOCKED, SeqCst);
+                        Ok(())
+                    } else {
+                        Err(self.enqueue_upgrade(state))
+                    }
                 } else {
-                    let (tx, rx) = oneshot::channel();
-                    *self.inner.upgrade_tx.get() = Some(tx);
-                    self.inner.state.store(state, SeqCst);
-                    Err(rx)
+                    Err(self.enqueue_upgrade(state))
                 }
             },
         }
@@ -737,13 +774,9 @@ impl<T> QrwLock<T> {
                 let new_state = state - 1;
 
                 // If an upgrade (read lock -> write lock) is pending
-                // and we have just reached a read lock count of 1:
-                if new_state == 1 && (*self.inner.upgrade_tx.get()).is_some() {
-                    self.inner.state.store(WRITE_LOCKED, SeqCst);
-                    // Send the upgrade signal. Ignore any errors (if
-                    // the upgrade receiver has dropped):
-                    let tx = (*self.inner.upgrade_tx.get()).take().unwrap();
-                    tx.send(()).ok();
+                // and we have just reached a read lock count of 0:
+                if new_state == 0 && !self.inner.upgrade_queue.is_empty() {
+                    self.fulfill_upgrade();
                 } else {
                     self.inner.state.store(new_state, SeqCst);
                 }
@@ -776,7 +809,11 @@ impl<T> QrwLock<T> {
         match self.contend() {
             0 => debug_assert!(false, "unreachable"),
             WRITE_LOCKED => {
-                self.inner.state.store(0, SeqCst);
+                if self.inner.upgrade_queue.is_empty() {
+                    self.inner.state.store(0, SeqCst);
+                } else {
+                    self.fulfill_upgrade();
+                }
             },
             _state => debug_assert!(false, "unreachable"),
         }
@@ -816,7 +853,7 @@ mod tests {
         let lock = QrwLock::from(0i32);
 
         let (future_r0_a, future_r0_b) = (lock.clone().read(), lock.clone().read());
-        let future_r0 = lock.clone().read().and_then(|guard| {
+        let future_r0 = Box::new(lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 0);
             println!("val[r0]: {}", *guard);
             ReadGuard::release(guard);
@@ -834,48 +871,48 @@ mod tests {
                 }).wait().unwrap();
 
             Ok(())
-        }).boxed();
+        }));
 
-        let future_w0 = lock.clone().write().and_then(|mut guard| {
+        let future_w0 = Box::new(lock.clone().write().and_then(|mut guard| {
             *guard = 5;
             println!("val is now: {}", *guard);
             Ok(())
-        }).boxed();
+        }));
 
-        let future_r1 = lock.clone().read().and_then(|guard| {
+        let future_r1 = Box::new(lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 5);
             println!("val[r1]: {}", *guard);
             Ok(())
-        }).boxed();
+        }));
 
-        let future_r2 = lock.clone().read().and_then(|guard| {
+        let future_r2 = Box::new(lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 5);
             println!("val[r2]: {}", *guard);
             Ok(())
-        }).boxed();
+        }));
 
-        let future_u0 = lock.clone().read().and_then(|read_guard| {
+        let future_u0 = Box::new(lock.clone().read().and_then(|read_guard| {
             println!("Upgrading read guard...");
             ReadGuard::upgrade(read_guard).and_then(|mut write_guard| {
                 println!("Read guard upgraded.");
                 *write_guard = 6;
                 Ok(())
             })
-        }).boxed();
+        }));
 
         // This read will take place before the above read lock can be
         // upgraded because read requests are processed in a chained fashion:
-        let future_r3 = lock.clone().read().and_then(|guard| {
+        let future_r3 = Box::new(lock.clone().read().and_then(|guard| {
             // Value should not yet be affected by the events following the
             // above write guard upgrade.
             assert_eq!(*guard, 5);
             println!("val[r3]: {}", *guard);
             Ok(())
-        }).boxed();
+        }));
 
         // future_r0.join4(future_w0, future_r1, future_r2).wait().unwrap();
 
-        let futures = vec![future_r0, future_w0, future_r1, future_r2, future_u0, future_r3];
+        let futures: Vec<Box<Future<Item=(), Error=Canceled>>> = vec![future_r0, future_w0, future_r1, future_r2, future_u0, future_r3];
         future::join_all(futures).wait().unwrap();
 
         let future_guard = lock.clone().read();
@@ -977,5 +1014,37 @@ mod tests {
         for idx in guard.iter() {
             assert_eq!(*idx, loop_count * redundancy_count);
         }
+    }
+
+    #[test]
+    fn multiple_upgrades() {
+        let lock = QrwLock::new(0usize);
+        let upgrade_count = 5;
+        let mut threads = Vec::with_capacity(upgrade_count * 2);
+
+        for i in 0..upgrade_count {
+            let future_read_guard_a = lock.clone().read();
+            let future_read_guard_b = lock.clone().read();
+
+            threads.push(thread::Builder::new().name(format!("read_thread_{}", i)).spawn(move || {
+                let _read_guard = future_read_guard_a.wait().expect("[0]");
+                ::std::thread::sleep(::std::time::Duration::from_millis(500));
+            }).expect("[1]"));
+
+            threads.push(thread::Builder::new().name(format!("upgrade_thread_{}", i)).spawn(move || {
+                let read_guard = future_read_guard_b.wait().expect("[2]");
+                let upgrade_guard = ReadGuard::upgrade(read_guard);
+                let mut write_guard = upgrade_guard.wait().expect("Error waiting for upgrade guard");
+                *write_guard += 1;
+            }).expect("[4]"));
+        }
+
+        for handle in threads {
+            let name = handle.thread().name().unwrap().to_owned();
+            handle.join().expect(&format!("Error joining thread: {:?}", name));
+        }
+
+        let guard = lock.read().wait().expect("[6]");
+        assert_eq!(*guard, upgrade_count);
     }
 }
