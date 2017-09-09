@@ -821,6 +821,11 @@ impl<T> QrwLock<T> {
         // fence(SeqCst);
         self.process_queue()
     }
+
+    /// Returns the pointer address of the contained value.
+    pub fn id(&self) -> usize {
+        self.inner.cell.get() as usize
+    }
 }
 
 impl<T> From<T> for QrwLock<T> {
