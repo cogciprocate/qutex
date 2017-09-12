@@ -744,7 +744,7 @@ impl<T> QrwLock<T> {
     /// Use `WriteGuard::downgrade` rather than calling this directly.
     #[inline]
     pub unsafe fn downgrade_write_lock(&self) {
-        if PRINT_DEBUG { println!("Attemptingh to downgrading write lock...(thread: {}) ...",
+        if PRINT_DEBUG { println!("Attempting to downgrade write lock...(thread: {}) ...",
             thread::current().name().unwrap_or("<unnamed>")); }
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
 
