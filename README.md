@@ -10,8 +10,8 @@ Non-thread-blocking queue-backed data locks based on Rust futures.
 `Cargo.toml`:
 
 ```rust
-[dependencies] 
-qutex = "0.0"
+[dependencies]
+qutex = "0.1"
 ```
 
 `main.rs`:
@@ -26,7 +26,7 @@ use qutex::Qutex;
 
 fn main() {
     let thread_count = 100;
-    let mut threads = Vec::with_capacity(thread_count);        
+    let mut threads = Vec::with_capacity(thread_count);
     let start_val = 0;
     let qutex = Qutex::new(start_val);
 
@@ -40,7 +40,7 @@ fn main() {
 
         threads.push(thread::spawn(|| {
             future_add.wait().unwrap();
-        }));    
+        }));
     }
 
     for thread in threads {
