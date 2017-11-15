@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 use std::cell::UnsafeCell;
-use futures::{Future, Poll, Canceled};
+use futures::{Future, Poll, Canceled, Async};
 use futures::sync::oneshot::{self, Sender, Receiver};
 use crossbeam::sync::SegQueue;
 
@@ -97,6 +97,27 @@ impl<T> Future for FutureGuard<T> {
             }
         } else {
             panic!("FutureGuard::poll: Task already completed.");
+        }
+    }
+}
+
+impl<T> Drop for FutureGuard<T> {
+    /// Gracefully unlock if this guard has a lock acquired.
+    fn drop(&mut self) {
+        if let Some(qutex) = self.qutex.take() {
+            self.rx.close();
+
+            match self.rx.poll() {
+                Ok(status) => {
+                    match status {
+                        Async::Ready(_) => {
+                            unsafe { qutex.direct_unlock(); }
+                        },
+                        Async::NotReady => (),
+                    }
+                },
+                Err(_) => (),
+            }
         }
     }
 }

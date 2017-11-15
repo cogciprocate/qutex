@@ -238,6 +238,32 @@ impl<T> Future for FutureUpgrade<T> {
     }
 }
 
+impl<T> Drop for FutureUpgrade<T> {
+    /// Gracefully unlock if this guard has a lock acquired.
+    fn drop(&mut self) {
+        if let Some(lock) = self.lock.take() {
+            match self.rx.take() {
+                Some(mut rx) => {
+                    rx.close();
+                    match rx.poll() {
+                        Ok(status) => {
+                            match status {
+                                Async::Ready(_) => {
+                                    unsafe { lock.release_write_lock() }
+                                },
+                                Async::NotReady => (),
+                            }
+                        },
+                        Err(_) => (),
+                    }
+                },
+                None => unsafe { lock.release_write_lock() },
+            }
+        }
+    }
+}
+
+
 
 /// A future which resolves to a `ReadGuard`.
 #[must_use = "futures do nothing unless polled"]
@@ -283,6 +309,26 @@ impl<T> Future for FutureReadGuard<T> {
     }
 }
 
+impl<T> Drop for FutureReadGuard<T> {
+    /// Gracefully unlock if this guard has a lock acquired.
+    fn drop(&mut self) {
+        if let Some(lock) = self.lock.take() {
+            self.rx.close();
+            match self.rx.poll() {
+                Ok(status) => {
+                    match status {
+                        Async::Ready(_) => {
+                            unsafe { lock.release_read_lock() }
+                        },
+                        Async::NotReady => (),
+                    }
+                },
+                Err(_) => (),
+            }
+        }
+    }
+}
+
 
 /// A future which resolves to a `WriteGuard`.
 #[must_use = "futures do nothing unless polled"]
@@ -324,6 +370,26 @@ impl<T> Future for FutureWriteGuard<T> {
             }))
         } else {
             panic!("FutureWriteGuard::poll: Task already completed.");
+        }
+    }
+}
+
+impl<T> Drop for FutureWriteGuard<T> {
+    /// Gracefully unlock if this guard has a lock acquired.
+    fn drop(&mut self) {
+        if let Some(lock) = self.lock.take() {
+            self.rx.close();
+            match self.rx.poll() {
+                Ok(status) => {
+                    match status {
+                        Async::Ready(_) => {
+                            unsafe { lock.release_write_lock() }
+                        },
+                        Async::NotReady => (),
+                    }
+                },
+                Err(_) => (),
+            }
         }
     }
 }
