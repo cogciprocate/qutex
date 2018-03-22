@@ -217,6 +217,8 @@ impl<T> Future for FutureUpgrade<T> {
     #[inline]
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
+            // FUTURE NOTE: Lexical borrowing should allow this to be
+            // restructured without the extra `.unwrap()` below.
             if self.rx.is_none() {
                 // fence(SeqCst);
                 if PRINT_DEBUG { println!("FutureUpgrade::poll: Uncontended. Upgrading. (thread: {})",
@@ -224,8 +226,7 @@ impl<T> Future for FutureUpgrade<T> {
                 Ok(Async::Ready(WriteGuard { lock: self.lock.take().unwrap() }))
             } else {
                 unsafe { self.lock.as_ref().unwrap().process_queues() }
-                // self.lock.as_ref().unwrap().
-                self.rx.poll().map(|res| res.map(|_| {
+                self.rx.as_mut().unwrap().poll().map(|res| res.map(|_| {
                     // fence(SeqCst);
                     if PRINT_DEBUG { println!("FutureUpgrade::poll: Ready. Upgrading. (thread: {})",
                         thread::current().name().unwrap_or("<unnamed>")); }
@@ -468,22 +469,6 @@ impl<T> QrwLock<T> {
         QrwLock {
             inner: Arc::new(Inner::from(val)),
         }
-    }
-
-    /// Returns a new `FutureReadGuard` which can be used as a future and will
-    /// resolve into a `ReadGuard`.
-    #[inline]
-    #[deprecated(since="0.0.9", note="please use `::read` instead")]
-    pub fn request_read(self) -> FutureReadGuard<T> {
-        self.read()
-    }
-
-    /// Returns a new `FutureWriteGuard` which can be used as a future and will
-    /// resolve into a `WriteGuard`.
-    #[inline]
-    #[deprecated(since="0.0.9", note="please use `::write` instead")]
-    pub fn request_write(self) -> FutureWriteGuard<T> {
-        self.write()
     }
 
     /// Returns a new `FutureReadGuard` which can be used as a future and will

@@ -2,6 +2,8 @@
 
 Non-thread-blocking queue-backed data locks based on Rust futures.
 
+Includes futures capable versions of `Mutex` and `RwLock`.
+
 #### [Documentation](https://docs.rs/qutex)
 
 
@@ -9,9 +11,9 @@ Non-thread-blocking queue-backed data locks based on Rust futures.
 
 `Cargo.toml`:
 
-```rust
+```toml
 [dependencies]
-qutex = "0.1"
+qutex = "0.2"
 ```
 
 `main.rs`:
