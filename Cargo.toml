@@ -16,4 +16,9 @@ categories = ["asynchronous", "concurrency", "data-structures"]
 
 [dependencies]
 crossbeam = "0.3"
-futures = "0.1"
+# futures = "0.2"
+
+[dependencies.futures]
+version = "0.2"
+git = "https://github.com/rust-lang-nursery/futures-rs"
+branch = "master"

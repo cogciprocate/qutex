@@ -9,8 +9,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 use std::cell::UnsafeCell;
-use futures::{Future, Poll, Canceled, Async};
-use futures::sync::oneshot::{self, Sender, Receiver};
+use futures::{executor, Future, Poll};
+use futures::channel::oneshot::{self, Sender, Receiver, Canceled};
+use futures::task::Context;
 use crossbeam::sync::SegQueue;
 
 
@@ -23,7 +24,6 @@ pub struct Guard<T> {
 impl<T> Guard<T> {
     /// Releases the lock held by a `Guard` and returns the original `Qutex`.
     pub fn unlock(guard: Guard<T>) -> Qutex<T> {
-        // guard.qutex.clone()
         let qutex = unsafe { ::std::ptr::read(&guard.qutex) };
         ::std::mem::forget(guard);
         qutex
@@ -71,8 +71,9 @@ impl<T> FutureGuard<T> {
 
     /// Blocks the current thread until this future resolves.
     #[inline]
+    #[deprecated(note = "Use `futures::executor::block_on` instead.")]
     pub fn wait(self) -> Result<Guard<T>, Canceled> {
-        <Self as Future>::wait(self)
+        executor::block_on(self)
     }
 }
 
@@ -81,16 +82,14 @@ impl<T> Future for FutureGuard<T> {
     type Error = Canceled;
 
     #[inline]
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
         if self.qutex.is_some() {
             unsafe {
                 self.qutex.as_ref().unwrap().process_queue()
-                    // .expect("Error polling FutureGuard");
             }
 
-            match self.rx.poll() {
+            match self.rx.poll(cx) {
                 Ok(status) => Ok(status.map(|_| {
-                    // fence(SeqCst);
                     Guard { qutex: self.qutex.take().unwrap() }
                 })),
                 Err(e) => Err(e.into()),
@@ -102,18 +101,16 @@ impl<T> Future for FutureGuard<T> {
 }
 
 impl<T> Drop for FutureGuard<T> {
-    /// Gracefully unlock if this guard has a lock acquired.
+    /// Gracefully unlock if this guard has a lock acquired but has not yet
+    /// been polled to completion.
     fn drop(&mut self) {
         if let Some(qutex) = self.qutex.take() {
             self.rx.close();
 
-            match self.rx.poll() {
+            match self.rx.try_recv() {
                 Ok(status) => {
-                    match status {
-                        Async::Ready(_) => {
-                            unsafe { qutex.direct_unlock(); }
-                        },
-                        Async::NotReady => (),
+                    if status.is_some() {
+                        unsafe { qutex.direct_unlock(); }
                     }
                 },
                 Err(_) => (),
@@ -225,7 +222,6 @@ impl<T> Qutex<T> {
     // * Consider removing unsafe qualifier.
     // * Return proper error type.
     //
-    // pub unsafe fn process_queue(&self) -> Result<(), ()> {
     pub unsafe fn process_queue(&self) {
         match self.inner.state.compare_and_swap(0, 1, SeqCst) {
             // Unlocked:
@@ -237,18 +233,15 @@ impl<T> Qutex<T> {
                         if req.tx.send(()).is_err() {
                             continue;
                         } else {
-                            // return Ok(())
                             break;
                         }
                     } else {
                         self.inner.state.store(0, SeqCst);
-                        // return Ok(());
                         break;
                     }
                 }
             },
             // Already locked, leave it alone:
-            // 1 => Ok(()),
             1 => (),
             // Something else:
             n => panic!("Qutex::process_queue: inner.state: {}.", n),
@@ -265,7 +258,6 @@ impl<T> Qutex<T> {
     pub unsafe fn direct_unlock(&self) {
         // TODO: Consider using `Ordering::Release`.
         self.inner.state.store(0, SeqCst);
-        // fence(SeqCst);
         self.process_queue()
     }
 }
@@ -292,6 +284,7 @@ impl<T> Clone for Qutex<T> {
 // Woefully incomplete:
 mod tests {
     use super::*;
+    use futures::{executor, FutureExt};
 
     #[test]
     fn simple() {
@@ -300,21 +293,21 @@ mod tests {
         println!("Reading val...");
         {
             let future_guard = val.clone().lock();
-            let guard = future_guard.wait().unwrap();
+            let guard = executor::block_on(future_guard).unwrap();
             println!("val: {}", *guard);
         }
 
         println!("Storing new val...");
         {
             let future_guard = val.clone().lock();
-            let mut guard = future_guard.wait().unwrap();
+            let mut guard = executor::block_on(future_guard).unwrap();
             *guard = 5;
         }
 
         println!("Reading val...");
         {
             let future_guard = val.clone().lock();
-            let guard = future_guard.wait().unwrap();
+            let guard = executor::block_on(future_guard).unwrap();
             println!("val: {}", *guard);
         }
     }
@@ -337,7 +330,7 @@ mod tests {
             });
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                future_write.wait().unwrap();
+                executor::block_on(future_write).unwrap();
             }).unwrap());
 
         }
@@ -346,7 +339,7 @@ mod tests {
             let future_guard = qutex.clone().lock();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i + thread_count)).spawn(|| {
-                let mut guard = future_guard.wait().unwrap();
+                let mut guard = executor::block_on(future_guard).unwrap();
                 *guard -= 1;
             }).unwrap())
         }
@@ -355,7 +348,19 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = qutex.clone().lock().wait().unwrap();
+        let guard = executor::block_on(qutex.clone().lock()).unwrap();
         assert_eq!(*guard, start_val);
+    }
+
+    #[test]
+    fn future_guard_drop() {
+        use std::thread;
+
+        let lock = Qutex::from(true);
+        let future_guard_0 = lock.clone().lock();
+        let future_guard_1 = lock.clone().lock();
+        let future_guard_2 = lock.clone().lock();
+
+        // TODO: FINISH ME
     }
 }

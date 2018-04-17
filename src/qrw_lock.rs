@@ -21,11 +21,12 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::sync::atomic::{fence, AtomicUsize};
-use std::sync::atomic::Ordering::{SeqCst, Acquire, /*Release*/};
+use std::sync::atomic::Ordering::{SeqCst, Acquire};
 use std::cell::UnsafeCell;
 use std::thread;
-use futures::{Future, Poll, Canceled, Async};
-use futures::sync::oneshot::{self, Sender, Receiver};
+use futures::{executor, Future, Poll, Async};
+use futures::channel::oneshot::{self, Sender, Receiver, Canceled};
+use futures::task::Context;
 use crossbeam::sync::SegQueue;
 
 
@@ -205,8 +206,10 @@ impl<T> FutureUpgrade<T> {
 
     /// Blocks the current thread until this future resolves.
     #[inline]
+    #[deprecated(note = "Use `futures::executor::block_on` instead.")]
     pub fn wait(self) -> Result<WriteGuard<T>, Canceled> {
-        <Self as Future>::wait(self)
+        // <Self as Future>::wait(self)
+        executor::block_on(self)
     }
 }
 
@@ -215,7 +218,7 @@ impl<T> Future for FutureUpgrade<T> {
     type Error = Canceled;
 
     #[inline]
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
             // FUTURE NOTE: Lexical borrowing should allow this to be
             // restructured without the extra `.unwrap()` below.
@@ -226,7 +229,7 @@ impl<T> Future for FutureUpgrade<T> {
                 Ok(Async::Ready(WriteGuard { lock: self.lock.take().unwrap() }))
             } else {
                 unsafe { self.lock.as_ref().unwrap().process_queues() }
-                self.rx.as_mut().unwrap().poll().map(|res| res.map(|_| {
+                self.rx.as_mut().unwrap().poll(cx).map(|res| res.map(|_| {
                     // fence(SeqCst);
                     if PRINT_DEBUG { println!("FutureUpgrade::poll: Ready. Upgrading. (thread: {})",
                         thread::current().name().unwrap_or("<unnamed>")); }
@@ -240,19 +243,17 @@ impl<T> Future for FutureUpgrade<T> {
 }
 
 impl<T> Drop for FutureUpgrade<T> {
-    /// Gracefully unlock if this guard has a lock acquired.
+    /// Gracefully unlock if this guard has a lock acquired but has not yet
+    /// been polled to completion.
     fn drop(&mut self) {
         if let Some(lock) = self.lock.take() {
             match self.rx.take() {
                 Some(mut rx) => {
                     rx.close();
-                    match rx.poll() {
+                    match rx.try_recv() {
                         Ok(status) => {
-                            match status {
-                                Async::Ready(_) => {
-                                    unsafe { lock.release_write_lock() }
-                                },
-                                Async::NotReady => (),
+                            if status.is_some() {
+                                unsafe { lock.release_write_lock() }
                             }
                         },
                         Err(_) => (),
@@ -285,8 +286,9 @@ impl<T> FutureReadGuard<T> {
 
     /// Blocks the current thread until this future resolves.
     #[inline]
+    #[deprecated(note = "Use `futures::executor::block_on` instead.")]
     pub fn wait(self) -> Result<ReadGuard<T>, Canceled> {
-        <Self as Future>::wait(self)
+        executor::block_on(self)
     }
 }
 
@@ -295,11 +297,10 @@ impl<T> Future for FutureReadGuard<T> {
     type Error = Canceled;
 
     #[inline]
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
             unsafe { self.lock.as_ref().unwrap().process_queues() }
-            self.rx.poll().map(|res| res.map(|_| {
-                // fence(SeqCst);
+            self.rx.poll(cx).map(|res| res.map(|_| {
                 if PRINT_DEBUG { println!("FutureReadGuard::poll: ReadGuard acquired. (thread: {})",
                     thread::current().name().unwrap_or("<unnamed>")); }
                 ReadGuard { lock: self.lock.take().unwrap() }
@@ -311,17 +312,15 @@ impl<T> Future for FutureReadGuard<T> {
 }
 
 impl<T> Drop for FutureReadGuard<T> {
-    /// Gracefully unlock if this guard has a lock acquired.
+    /// Gracefully unlock if this guard has a lock acquired but has not yet
+    /// been polled to completion.
     fn drop(&mut self) {
         if let Some(lock) = self.lock.take() {
             self.rx.close();
-            match self.rx.poll() {
+            match self.rx.try_recv() {
                 Ok(status) => {
-                    match status {
-                        Async::Ready(_) => {
-                            unsafe { lock.release_read_lock() }
-                        },
-                        Async::NotReady => (),
+                    if status.is_some() {
+                        unsafe { lock.release_read_lock() }
                     }
                 },
                 Err(_) => (),
@@ -350,8 +349,9 @@ impl<T> FutureWriteGuard<T> {
 
     /// Blocks the current thread until this future resolves.
     #[inline]
+    #[deprecated(note = "Use `futures::executor::block_on` instead.")]
     pub fn wait(self) -> Result<WriteGuard<T>, Canceled> {
-        <Self as Future>::wait(self)
+        executor::block_on(self)
     }
 }
 
@@ -360,11 +360,10 @@ impl<T> Future for FutureWriteGuard<T> {
     type Error = Canceled;
 
     #[inline]
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
         if self.lock.is_some() {
             unsafe { self.lock.as_ref().unwrap().process_queues() }
-            self.rx.poll().map(|res| res.map(|_| {
-                // fence(SeqCst);
+            self.rx.poll(cx).map(|res| res.map(|_| {
                 if PRINT_DEBUG { println!("FutureWriteGuard::poll: WriteGuard acquired. (thread: {})",
                     thread::current().name().unwrap_or("<unnamed>")); }
                 WriteGuard { lock: self.lock.take().unwrap() }
@@ -376,17 +375,15 @@ impl<T> Future for FutureWriteGuard<T> {
 }
 
 impl<T> Drop for FutureWriteGuard<T> {
-    /// Gracefully unlock if this guard has a lock acquired.
+    /// Gracefully unlock if this guard has a lock acquired but has not yet
+    /// been polled to completion.
     fn drop(&mut self) {
         if let Some(lock) = self.lock.take() {
             self.rx.close();
-            match self.rx.poll() {
+            match self.rx.try_recv() {
                 Ok(status) => {
-                    match status {
-                        Async::Ready(_) => {
-                            unsafe { lock.release_write_lock() }
-                        },
-                        Async::NotReady => (),
+                    if status.is_some() {
+                        unsafe { lock.release_write_lock() }
                     }
                 },
                 Err(_) => (),
@@ -430,7 +427,6 @@ struct Inner<T> {
     cell: UnsafeCell<T>,
     queue: SegQueue<QrwRequest>,
     tip: UnsafeCell<Option<QrwRequest>>,
-    // upgrade_tx: UnsafeCell<Option<Sender<()>>>,
     upgrade_queue: SegQueue<Sender<()>>,
 }
 
@@ -442,7 +438,6 @@ impl<T> From<T> for Inner<T> {
             cell: UnsafeCell::new(val),
             queue: SegQueue::new(),
             tip: UnsafeCell::new(None),
-            // upgrade_tx: UnsafeCell::new(None),
             upgrade_queue: SegQueue::new(),
         }
     }
@@ -893,31 +888,17 @@ impl<T> Clone for QrwLock<T> {
 // Woefully incomplete.
 mod tests {
     use std::thread;
-    use futures::future;
+    use futures::{future, FutureExt};
     use super::*;
 
     #[test]
     fn simple() {
         let lock = QrwLock::from(0i32);
 
-        let (future_r0_a, future_r0_b) = (lock.clone().read(), lock.clone().read());
         let future_r0 = Box::new(lock.clone().read().and_then(|guard| {
             assert_eq!(*guard, 0);
             println!("val[r0]: {}", *guard);
             ReadGuard::release(guard);
-
-            future_r0_a.and_then(|guard| {
-                    assert_eq!(*guard, 0);
-                    println!("val[r0a]: {}", *guard);
-                    Ok(())
-                }).wait().unwrap();
-
-            future_r0_b.and_then(|guard| {
-                    assert_eq!(*guard, 0);
-                    println!("val[r0b]: {}", *guard);
-                    Ok(())
-                }).wait().unwrap();
-
             Ok(())
         }));
 
@@ -961,10 +942,10 @@ mod tests {
         // future_r0.join4(future_w0, future_r1, future_r2).wait().unwrap();
 
         let futures: Vec<Box<Future<Item=(), Error=Canceled>>> = vec![future_r0, future_w0, future_r1, future_r2, future_u0, future_r3];
-        future::join_all(futures).wait().unwrap();
+        executor::block_on(future::join_all(futures)).unwrap();
 
         let future_guard = lock.clone().read();
-        let guard = future_guard.wait().unwrap();
+        let guard = executor::block_on(future_guard).unwrap();
         assert_eq!(*guard, 6);
     }
 
@@ -996,7 +977,7 @@ mod tests {
             });
 
             threads.push(thread::spawn(|| {
-                future_write.join(future_read).wait().unwrap();
+                executor::block_on(future_write.join(future_read)).unwrap();
             }));
         }
 
@@ -1004,14 +985,14 @@ mod tests {
             let future_write_guard = lock.clone().write();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                let mut guard = future_write_guard.wait().unwrap();
+                let mut guard = executor::block_on(future_write_guard).unwrap();
                 *guard -= 1
             }).unwrap());
 
             let future_read_guard = lock.clone().read();
 
             threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                let _val = *future_read_guard.wait().unwrap();
+                let _val = *executor::block_on(future_read_guard).unwrap();
             }).unwrap());
         }
 
@@ -1019,7 +1000,7 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = lock.clone().read().wait().unwrap();
+        let guard = executor::block_on(lock.clone().read()).unwrap();
         assert_eq!(*guard, start_val);
     }
 
@@ -1036,7 +1017,7 @@ mod tests {
             let future_read_guard = lock.clone().read();
 
             threads.push(thread::Builder::new().name(format!("write_thread_{}", i)).spawn(move || {
-                let mut guard = future_write_guard.wait().unwrap();
+                let mut guard = executor::block_on(future_write_guard).unwrap();
                 for _ in 0..redundancy_count {
                     for idx in guard.iter_mut() {
                         *idx += 1;
@@ -1045,7 +1026,7 @@ mod tests {
             }).unwrap());
 
             threads.push(thread::Builder::new().name(format!("read_thread_{}", i)).spawn(move || {
-                let guard = future_read_guard.wait().unwrap();
+                let guard = executor::block_on(future_read_guard).unwrap();
                 let expected_val = redundancy_count * (i + 1);
                 for idx in guard.iter() {
                     assert!(*idx == expected_val, "Lock data mismatch. \
@@ -1058,7 +1039,7 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = lock.clone().read().wait().unwrap();
+        let guard = executor::block_on(lock.clone().read()).unwrap();
         for idx in guard.iter() {
             assert_eq!(*idx, loop_count * redundancy_count);
         }
@@ -1075,14 +1056,14 @@ mod tests {
             let future_read_guard_b = lock.clone().read();
 
             threads.push(thread::Builder::new().name(format!("read_thread_{}", i)).spawn(move || {
-                let _read_guard = future_read_guard_a.wait().expect("[0]");
+                let _read_guard = executor::block_on(future_read_guard_a).expect("[0]");
                 ::std::thread::sleep(::std::time::Duration::from_millis(500));
             }).expect("[1]"));
 
             threads.push(thread::Builder::new().name(format!("upgrade_thread_{}", i)).spawn(move || {
-                let read_guard = future_read_guard_b.wait().expect("[2]");
+                let read_guard = executor::block_on(future_read_guard_b).expect("[2]");
                 let upgrade_guard = ReadGuard::upgrade(read_guard);
-                let mut write_guard = upgrade_guard.wait().expect("Error waiting for upgrade guard");
+                let mut write_guard = executor::block_on(upgrade_guard).expect("Error waiting for upgrade guard");
                 *write_guard += 1;
             }).expect("[4]"));
         }
@@ -1092,7 +1073,7 @@ mod tests {
             handle.join().expect(&format!("Error joining thread: {:?}", name));
         }
 
-        let guard = lock.read().wait().expect("[6]");
+        let guard = executor::block_on(lock.read()).expect("[6]");
         assert_eq!(*guard, upgrade_count);
     }
 }
