@@ -19,6 +19,6 @@ crossbeam = "0.3"
 # futures = "0.2"
 
 [dependencies.futures]
-version = "0.2"
+version = "~0.2.1"
 git = "https://github.com/rust-lang-nursery/futures-rs"
 branch = "master"
