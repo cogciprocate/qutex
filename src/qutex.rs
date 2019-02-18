@@ -4,16 +4,15 @@
 // * It is unclear how many of the unsafe methods within need actually remain
 //   unsafe.
 
+use crossbeam::sync::SegQueue;
+use futures::channel::oneshot::{self, Canceled, Receiver, Sender};
+use futures::task::Context;
+use futures::{executor, Future, Poll};
+use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
-use std::cell::UnsafeCell;
-use futures::{executor, Future, Poll};
-use futures::channel::oneshot::{self, Sender, Receiver, Canceled};
-use futures::task::Context;
-use crossbeam::sync::SegQueue;
-
+use std::sync::Arc;
 
 /// Allows access to the data contained within a lock just like a mutex guard.
 #[derive(Debug)]
@@ -51,7 +50,6 @@ impl<T> Drop for Guard<T> {
     }
 }
 
-
 /// A future which resolves to a `Guard`.
 #[must_use = "futures do nothing unless polled"]
 #[derive(Debug)]
@@ -84,13 +82,11 @@ impl<T> Future for FutureGuard<T> {
     #[inline]
     fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
         if self.qutex.is_some() {
-            unsafe {
-                self.qutex.as_ref().unwrap().process_queue()
-            }
+            unsafe { self.qutex.as_ref().unwrap().process_queue() }
 
             match self.rx.poll(cx) {
-                Ok(status) => Ok(status.map(|_| {
-                    Guard { qutex: self.qutex.take().unwrap() }
+                Ok(status) => Ok(status.map(|_| Guard {
+                    qutex: self.qutex.take().unwrap(),
                 })),
                 Err(e) => Err(e.into()),
             }
@@ -110,15 +106,16 @@ impl<T> Drop for FutureGuard<T> {
             match self.rx.try_recv() {
                 Ok(status) => {
                     if status.is_some() {
-                        unsafe { qutex.direct_unlock(); }
+                        unsafe {
+                            qutex.direct_unlock();
+                        }
                     }
-                },
+                }
                 Err(_) => (),
             }
         }
     }
 }
-
 
 /// A request to lock the qutex for exclusive access.
 #[derive(Debug)]
@@ -155,7 +152,6 @@ impl<T> From<T> for Inner<T> {
 unsafe impl<T: Send> Send for Inner<T> {}
 unsafe impl<T: Send> Sync for Inner<T> {}
 
-
 /// A lock-free-queue-backed exclusive data lock.
 #[derive(Debug)]
 pub struct Qutex<T> {
@@ -175,7 +171,9 @@ impl<T> Qutex<T> {
     /// resolve into a `Guard`.
     pub fn lock(self) -> FutureGuard<T> {
         let (tx, rx) = oneshot::channel();
-        unsafe { self.push_request(Request::new(tx)); }
+        unsafe {
+            self.push_request(Request::new(tx));
+        }
         FutureGuard::new(self, rx)
     }
 
@@ -240,7 +238,7 @@ impl<T> Qutex<T> {
                         break;
                     }
                 }
-            },
+            }
             // Already locked, leave it alone:
             1 => (),
             // Something else:
@@ -278,7 +276,6 @@ impl<T> Clone for Qutex<T> {
         }
     }
 }
-
 
 #[cfg(test)]
 // Woefully incomplete:
@@ -329,19 +326,28 @@ mod tests {
                 Ok(())
             });
 
-            threads.push(thread::Builder::new().name(format!("test_thread_{}", i)).spawn(|| {
-                executor::block_on(future_write).unwrap();
-            }).unwrap());
-
+            threads.push(
+                thread::Builder::new()
+                    .name(format!("test_thread_{}", i))
+                    .spawn(|| {
+                        executor::block_on(future_write).unwrap();
+                    })
+                    .unwrap(),
+            );
         }
 
         for i in 0..thread_count {
             let future_guard = qutex.clone().lock();
 
-            threads.push(thread::Builder::new().name(format!("test_thread_{}", i + thread_count)).spawn(|| {
-                let mut guard = executor::block_on(future_guard).unwrap();
-                *guard -= 1;
-            }).unwrap())
+            threads.push(
+                thread::Builder::new()
+                    .name(format!("test_thread_{}", i + thread_count))
+                    .spawn(|| {
+                        let mut guard = executor::block_on(future_guard).unwrap();
+                        *guard -= 1;
+                    })
+                    .unwrap(),
+            )
         }
 
         for thread in threads {

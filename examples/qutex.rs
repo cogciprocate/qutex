@@ -1,9 +1,9 @@
-extern crate qutex;
 extern crate futures;
+extern crate qutex;
 
-use std::thread;
 use futures::{executor, FutureExt};
 use qutex::Qutex;
+use std::thread;
 
 fn main() {
     let thread_count = 100;

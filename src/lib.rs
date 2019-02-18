@@ -9,9 +9,10 @@
 extern crate crossbeam;
 extern crate futures;
 
-mod qutex;
 mod qrw_lock;
+mod qutex;
 
-pub use self::qutex::{Guard, FutureGuard, Request, Qutex};
-pub use self::qrw_lock::{ReadGuard, WriteGuard, FutureReadGuard, FutureWriteGuard,
-	QrwRequest, RequestKind, QrwLock};
+pub use self::qrw_lock::{
+    FutureReadGuard, FutureWriteGuard, QrwLock, QrwRequest, ReadGuard, RequestKind, WriteGuard,
+};
+pub use self::qutex::{FutureGuard, Guard, Qutex, Request};
