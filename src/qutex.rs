@@ -24,6 +24,7 @@ impl<T> Guard<T> {
     pub fn unlock(guard: Guard<T>) -> Qutex<T> {
         let qutex = unsafe { ::std::ptr::read(&guard.qutex) };
         ::std::mem::forget(guard);
+        unsafe { qutex.direct_unlock() }
         qutex
     }
 }
@@ -363,5 +364,17 @@ mod tests {
         let _future_guard_2 = lock.clone().lock();
 
         // TODO: FINISH ME
+    }
+
+    #[test]
+    fn explicit_unlock() {
+        let lock = Qutex::from(true);
+
+        let mut guard_0 = lock.clone().lock().wait().unwrap();
+        *guard_0 = false;
+        let _ = Guard::unlock(guard_0);
+        // Will deadlock if this doesn't work:
+        let guard_1 = lock.clone().lock().wait().unwrap();
+        assert!(*guard_1 == false);
     }
 }
