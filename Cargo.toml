@@ -15,7 +15,7 @@ keywords = ["futures", "async", "data-structures", "mutex", "concurrency"]
 categories = ["asynchronous", "concurrency", "data-structures"]
 
 [dependencies]
-crossbeam = "0.3"
+crossbeam = "0.7"
 # futures = "0.2"
 
 [dependencies.futures-preview]
