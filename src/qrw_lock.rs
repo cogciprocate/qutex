@@ -17,7 +17,7 @@
 //   Doing some spinning now]
 //
 
-use crossbeam::sync::SegQueue;
+use crossbeam::queue::SegQueue;
 use futures::sync::oneshot::{self, Canceled, Receiver, Sender};
 use futures::{Async, Future, Poll};
 use std::cell::UnsafeCell;
@@ -561,7 +561,7 @@ impl<T> QrwLock<T> {
 
         unsafe {
             // Pop twice if the tip was `None` but the queue was not empty.
-            ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop()).or_else(
+            ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop().ok()).or_else(
                 || {
                     if (*self.inner.tip.get()).is_some() {
                         self.pop_request()
@@ -580,7 +580,7 @@ impl<T> QrwLock<T> {
 
         unsafe {
             if (*self.inner.tip.get()).is_none() {
-                ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.try_pop());
+                ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop().ok());
             }
             (*self.inner.tip.get()).as_ref().map(|req| req.kind)
         }
@@ -701,7 +701,7 @@ impl<T> QrwLock<T> {
         debug_assert!(self.inner.state.load(Acquire) == CONTENDED);
 
         loop {
-            match self.inner.upgrade_queue.try_pop() {
+            match self.inner.upgrade_queue.pop().ok() {
                 Some(tx) => match tx.send(()) {
                     Ok(_) => {
                         if PRINT_DEBUG {

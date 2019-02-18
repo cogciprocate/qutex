@@ -4,7 +4,7 @@
 // * It is unclear how many of the unsafe methods within need actually remain
 //   unsafe.
 
-use crossbeam::sync::SegQueue;
+use crossbeam::queue::SegQueue;
 use futures::sync::oneshot::{self, Canceled, Receiver, Sender};
 use futures::{Future, Poll};
 use std::cell::UnsafeCell;
@@ -223,7 +223,7 @@ impl<T> Qutex<T> {
             // Unlocked:
             0 => {
                 loop {
-                    if let Some(req) = self.inner.queue.try_pop() {
+                    if let Some(req) = self.inner.queue.pop().ok() {
                         // If there is a send error, a requester has dropped
                         // its receiver so just go to the next.
                         if req.tx.send(()).is_err() {
