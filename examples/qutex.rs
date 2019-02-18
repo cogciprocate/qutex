@@ -1,7 +1,7 @@
 extern crate futures;
 extern crate qutex;
 
-use futures::{executor, FutureExt};
+use futures::Future;
 use qutex::Qutex;
 use std::thread;
 
@@ -20,7 +20,7 @@ fn main() {
         });
 
         threads.push(thread::spawn(|| {
-            executor::block_on(future_add).unwrap();
+            future_add.wait().unwrap();
         }));
     }
 
@@ -28,7 +28,7 @@ fn main() {
         thread.join().unwrap();
     }
 
-    let val = executor::block_on(qutex.lock()).unwrap();
+    let val = qutex.lock().wait().unwrap();
     assert_eq!(*val, start_val + thread_count);
     println!("Qutex final value: {}", *val);
 }

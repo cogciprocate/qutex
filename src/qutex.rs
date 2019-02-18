@@ -5,9 +5,8 @@
 //   unsafe.
 
 use crossbeam::sync::SegQueue;
-use futures::channel::oneshot::{self, Canceled, Receiver, Sender};
-use futures::task::Context;
-use futures::{executor, Future, Poll};
+use futures::sync::oneshot::{self, Canceled, Receiver, Sender};
+use futures::{Future, Poll};
 use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::AtomicUsize;
@@ -69,9 +68,8 @@ impl<T> FutureGuard<T> {
 
     /// Blocks the current thread until this future resolves.
     #[inline]
-    #[deprecated(note = "Use `futures::executor::block_on` instead.")]
     pub fn wait(self) -> Result<Guard<T>, Canceled> {
-        executor::block_on(self)
+        <Self as Future>::wait(self)
     }
 }
 
@@ -80,11 +78,11 @@ impl<T> Future for FutureGuard<T> {
     type Error = Canceled;
 
     #[inline]
-    fn poll(&mut self, cx: &mut Context) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         if self.qutex.is_some() {
             unsafe { self.qutex.as_ref().unwrap().process_queue() }
 
-            match self.rx.poll(cx) {
+            match self.rx.poll() {
                 Ok(status) => Ok(status.map(|_| Guard {
                     qutex: self.qutex.take().unwrap(),
                 })),
@@ -281,7 +279,7 @@ impl<T> Clone for Qutex<T> {
 // Woefully incomplete:
 mod tests {
     use super::*;
-    use futures::{executor, FutureExt};
+    use futures::Future;
 
     #[test]
     fn simple() {
@@ -290,21 +288,22 @@ mod tests {
         println!("Reading val...");
         {
             let future_guard = val.clone().lock();
-            let guard = executor::block_on(future_guard).unwrap();
+            let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
 
         println!("Storing new val...");
         {
             let future_guard = val.clone().lock();
-            let mut guard = executor::block_on(future_guard).unwrap();
+            let mut guard = future_guard.wait().unwrap();
+
             *guard = 5;
         }
 
         println!("Reading val...");
         {
             let future_guard = val.clone().lock();
-            let guard = executor::block_on(future_guard).unwrap();
+            let guard = future_guard.wait().unwrap();
             println!("val: {}", *guard);
         }
     }
@@ -329,9 +328,7 @@ mod tests {
             threads.push(
                 thread::Builder::new()
                     .name(format!("test_thread_{}", i))
-                    .spawn(|| {
-                        executor::block_on(future_write).unwrap();
-                    })
+                    .spawn(|| future_write.wait().unwrap())
                     .unwrap(),
             );
         }
@@ -343,7 +340,7 @@ mod tests {
                 thread::Builder::new()
                     .name(format!("test_thread_{}", i + thread_count))
                     .spawn(|| {
-                        let mut guard = executor::block_on(future_guard).unwrap();
+                        let mut guard = future_guard.wait().unwrap();
                         *guard -= 1;
                     })
                     .unwrap(),
@@ -354,18 +351,16 @@ mod tests {
             thread.join().unwrap();
         }
 
-        let guard = executor::block_on(qutex.clone().lock()).unwrap();
+        let guard = qutex.clone().lock().wait().unwrap();
         assert_eq!(*guard, start_val);
     }
 
     #[test]
     fn future_guard_drop() {
-        use std::thread;
-
         let lock = Qutex::from(true);
-        let future_guard_0 = lock.clone().lock();
-        let future_guard_1 = lock.clone().lock();
-        let future_guard_2 = lock.clone().lock();
+        let _future_guard_0 = lock.clone().lock();
+        let _future_guard_1 = lock.clone().lock();
+        let _future_guard_2 = lock.clone().lock();
 
         // TODO: FINISH ME
     }
