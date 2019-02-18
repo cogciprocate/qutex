@@ -360,12 +360,10 @@ mod tests {
 
     #[test]
     fn future_guard_drop() {
-        use std::thread;
-
         let lock = Qutex::from(true);
-        let future_guard_0 = lock.clone().lock();
-        let future_guard_1 = lock.clone().lock();
-        let future_guard_2 = lock.clone().lock();
+        let _future_guard_0 = lock.clone().lock();
+        let _future_guard_1 = lock.clone().lock();
+        let _future_guard_2 = lock.clone().lock();
 
         // TODO: FINISH ME
     }
