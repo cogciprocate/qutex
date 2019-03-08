@@ -1,6 +1,6 @@
 [package]
 name = "qutex"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Nick Sanders <cogciprocate@gmail.com>"]
 license = "MIT"
 description = """\
@@ -11,7 +11,7 @@ documentation = "https://docs.rs/qutex"
 homepage = "https://github.com/cogciprocate/qutex"
 repository = "https://github.com/cogciprocate/qutex"
 readme = "README.md"
-keywords = ["futures", "async", "data-structures", "mutex", "concurrency"]
+keywords = ["futures", "async", "data-structures", "mutex", "lock"]
 categories = ["asynchronous", "concurrency", "data-structures"]
 edition = "2018"
 
