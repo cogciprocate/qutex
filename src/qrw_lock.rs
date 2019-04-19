@@ -559,6 +559,14 @@ impl<T> QrwLock<T> {
     fn pop_request(&self) -> Option<QrwRequest> {
         debug_assert_eq!(self.inner.state.load(Acquire) & CONTENDED, CONTENDED);
 
+        if PRINT_DEBUG {
+            println!(
+                "Popping request from queue \
+                 (thread: {}) ...",
+                thread::current().name().unwrap_or("<unnamed>")
+            );
+        }
+
         unsafe {
             // Pop twice if the tip was `None` but the queue was not empty.
             ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop().ok()).or_else(
@@ -610,12 +618,6 @@ impl<T> QrwLock<T> {
                                     thread::current().name().unwrap_or("<unnamed>")
                                 );
                             }
-
-                            if let Some(RequestKind::Read) = self.peek_request_kind() {
-                                continue;
-                            } else {
-                                break;
-                            }
                         }
                         RequestKind::Write => {
                             debug_assert_eq!(state, 0);
@@ -631,6 +633,28 @@ impl<T> QrwLock<T> {
                             break;
                         }
                     }
+                } else {
+                    if PRINT_DEBUG {
+                        println!(
+                            "A requester has dropped \
+                             (thread: {}) ...",
+                            thread::current().name().unwrap_or("<unnamed>")
+                        );
+                    }
+                }
+
+                if let Some(RequestKind::Read) = self.peek_request_kind() {
+                    debug_assert!(state != WRITE_LOCKED);
+                    if PRINT_DEBUG {
+                        println!(
+                            "Next request kind is a read, popping next request...\
+                             (thread: {}) ...",
+                            thread::current().name().unwrap_or("<unnamed>")
+                        );
+                    }
+                    continue;
+                } else {
+                    break;
                 }
             } else {
                 break;
@@ -694,7 +718,7 @@ impl<T> QrwLock<T> {
     fn process_upgrade_queue(&self) -> bool {
         if PRINT_DEBUG {
             println!(
-                "Fulfilling upgrade... (thread: {})",
+                "Processing upgrade queue... (thread: {})",
                 thread::current().name().unwrap_or("<unnamed>")
             );
         }
