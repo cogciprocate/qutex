@@ -31,7 +31,16 @@ const READ_COUNT_MASK: usize = 0x00FFFFFF;
 const WRITE_LOCKED: usize = 1 << 24;
 const CONTENDED: usize = 1 << 25;
 
-const PRINT_DEBUG: bool = false;
+const PRINT_DEBUG: bool = true;
+
+/// Prints a debugging message if enabled.
+#[inline(always)]
+fn print_debug(msg: &str) {
+    if PRINT_DEBUG {
+        println!("[Thread: {}] {}",
+            ::std::thread::current().name().unwrap_or("<unnamed>"), msg);
+    }
+}
 
 /// Our currently favored thread 'chill out' method used when multiple threads
 /// are attempting to contend concurrently.
@@ -82,20 +91,11 @@ impl<T> ReadGuard<T> {
 
         match unsafe { guard.lock.upgrade_read_lock() } {
             Ok(_) => {
-                if PRINT_DEBUG {
-                    println!(
-                        "ReadGuard::upgrade: Read lock is now upgraded (thread: {}) ...",
-                        thread::current().name().unwrap_or("<unnamed>")
-                    );
-                }
+                print_debug("qutex::ReadGuard::upgrade: Read lock is now upgraded.");
                 unsafe { FutureUpgrade::new(extract_lock(guard), None) }
             }
             Err(rx) => {
-                if PRINT_DEBUG {
-                    println!("ReadGuard::upgrade: Waiting for the read count to reach 1 (thread: {}) ...",
-                    thread::current().name().unwrap_or("<unnamed>"));
-                }
-
+                print_debug("qutex::ReadGuard::upgrade: Waiting for the read count to reach 1...");
                 unsafe { FutureUpgrade::new(extract_lock(guard), Some(rx)) }
             }
         }
@@ -223,13 +223,7 @@ impl<T> Future for FutureUpgrade<T> {
             // FUTURE NOTE: Lexical borrowing should allow this to be
             // restructured without the extra `.unwrap()` below.
             if self.rx.is_none() {
-                // fence(SeqCst);
-                if PRINT_DEBUG {
-                    println!(
-                        "FutureUpgrade::poll: Uncontended. Upgrading. (thread: {})",
-                        thread::current().name().unwrap_or("<unnamed>")
-                    );
-                }
+                print_debug("qutex::FutureUpgrade::poll: Uncontended. Upgrading.");
                 Ok(Async::Ready(WriteGuard {
                     lock: self.lock.take().unwrap(),
                 }))
@@ -237,13 +231,7 @@ impl<T> Future for FutureUpgrade<T> {
                 unsafe { self.lock.as_ref().unwrap().process_queues() }
                 self.rx.as_mut().unwrap().poll().map(|res| {
                     res.map(|_| {
-                        // fence(SeqCst);
-                        if PRINT_DEBUG {
-                            println!(
-                                "FutureUpgrade::poll: Ready. Upgrading. (thread: {})",
-                                thread::current().name().unwrap_or("<unnamed>")
-                            );
-                        }
+                        print_debug("qutex::FutureUpgrade::poll: Ready. Upgrading.");
                         WriteGuard {
                             lock: self.lock.take().unwrap(),
                         }
@@ -313,12 +301,7 @@ impl<T> Future for FutureReadGuard<T> {
             unsafe { self.lock.as_ref().unwrap().process_queues() }
             self.rx.poll().map(|res| {
                 res.map(|_| {
-                    if PRINT_DEBUG {
-                        println!(
-                            "FutureReadGuard::poll: ReadGuard acquired. (thread: {})",
-                            thread::current().name().unwrap_or("<unnamed>")
-                        );
-                    }
+                    print_debug("qutex::FutureReadGuard::poll: ReadGuard acquired.");
                     ReadGuard {
                         lock: self.lock.take().unwrap(),
                     }
@@ -382,12 +365,7 @@ impl<T> Future for FutureWriteGuard<T> {
             unsafe { self.lock.as_ref().unwrap().process_queues() }
             self.rx.poll().map(|res| {
                 res.map(|_| {
-                    if PRINT_DEBUG {
-                        println!(
-                            "FutureWriteGuard::poll: WriteGuard acquired. (thread: {})",
-                            thread::current().name().unwrap_or("<unnamed>")
-                        );
-                    }
+                    print_debug("qutex::FutureWriteGuard::poll: WriteGuard acquired.");
                     WriteGuard {
                         lock: self.lock.take().unwrap(),
                     }
@@ -488,12 +466,7 @@ impl<T> QrwLock<T> {
     /// resolve into a `ReadGuard`.
     #[inline]
     pub fn read(self) -> FutureReadGuard<T> {
-        if PRINT_DEBUG {
-            println!(
-                "Requesting read lock.(thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::read: Requesting read lock...");
         let (tx, rx) = oneshot::channel();
         unsafe {
             self.enqueue_lock_request(QrwRequest::new(tx, RequestKind::Read));
@@ -505,12 +478,7 @@ impl<T> QrwLock<T> {
     /// resolve into a `WriteGuard`.
     #[inline]
     pub fn write(self) -> FutureWriteGuard<T> {
-        if PRINT_DEBUG {
-            println!(
-                "Requesting write lock.(thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::write: Requesting write lock...");
         let (tx, rx) = oneshot::channel();
         unsafe {
             self.enqueue_lock_request(QrwRequest::new(tx, RequestKind::Write));
@@ -558,14 +526,7 @@ impl<T> QrwLock<T> {
     #[inline]
     fn pop_request(&self) -> Option<QrwRequest> {
         debug_assert_eq!(self.inner.state.load(Acquire) & CONTENDED, CONTENDED);
-
-        if PRINT_DEBUG {
-            println!(
-                "Popping request from queue \
-                 (thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::pop_request: Popping request from queue...");
 
         unsafe {
             // Pop twice if the tip was `None` but the queue was not empty.
@@ -610,48 +571,23 @@ impl<T> QrwLock<T> {
                     match req.kind {
                         RequestKind::Read => {
                             state += 1;
-                            if PRINT_DEBUG {
-                                println!(
-                                    "Locked for reading (state: {}) \
-                                     (thread: {}) ...",
-                                    state,
-                                    thread::current().name().unwrap_or("<unnamed>")
-                                );
-                            }
+                            print_debug("qutex::QrwLock::fulfill_request: Locked for reading.");
                         }
                         RequestKind::Write => {
                             debug_assert_eq!(state, 0);
                             state = WRITE_LOCKED;
-                            if PRINT_DEBUG {
-                                println!(
-                                    "Locked for writing (state: {}) \
-                                     (thread: {}) ...",
-                                    state,
-                                    thread::current().name().unwrap_or("<unnamed>")
-                                );
-                            }
+                            print_debug("qutex::QrwLock::fulfill_request: Locked for writing");
                             break;
                         }
                     }
                 } else {
-                    if PRINT_DEBUG {
-                        println!(
-                            "A requester has dropped \
-                             (thread: {}) ...",
-                            thread::current().name().unwrap_or("<unnamed>")
-                        );
-                    }
+                    print_debug("qutex::QrwLock::fulfill_request: A requester has dropped.");
                 }
 
                 if let Some(RequestKind::Read) = self.peek_request_kind() {
                     debug_assert!(state != WRITE_LOCKED);
-                    if PRINT_DEBUG {
-                        println!(
-                            "Next request kind is a read, popping next request...\
-                             (thread: {}) ...",
-                            thread::current().name().unwrap_or("<unnamed>")
-                        );
-                    }
+                    print_debug("qutex::QrwLock::fulfill_request: \
+                        Next request kind is a read, popping next request...");
                     continue;
                 } else {
                     break;
@@ -673,13 +609,7 @@ impl<T> QrwLock<T> {
         let read_count = state & READ_COUNT_MASK;
 
         if state & READ_COUNT_MASK == read_count {
-            if PRINT_DEBUG {
-                println!(
-                    "Read count: {} (thread: {}) ...",
-                    read_count,
-                    thread::current().name().unwrap_or("<unnamed>")
-                );
-            }
+            print_debug("qutex::QrwLock::read_count: Read count: {}.");
             Some(read_count as u32)
         } else {
             None
@@ -689,12 +619,7 @@ impl<T> QrwLock<T> {
     /// Acquires exclusive access to the lock state and returns it.
     #[inline(always)]
     fn contend(&self) -> usize {
-        if PRINT_DEBUG {
-            println!(
-                "Processing state... (thread: {})",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::contend: Processing state...");
         let mut spins: u32 = 0;
 
         loop {
@@ -716,35 +641,20 @@ impl<T> QrwLock<T> {
 
     /// Fulfills an upgrade request.
     fn process_upgrade_queue(&self) -> bool {
-        if PRINT_DEBUG {
-            println!(
-                "Processing upgrade queue... (thread: {})",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::process_upgrade_queue: Processing upgrade queue...");
         debug_assert!(self.inner.state.load(Acquire) == CONTENDED);
 
         loop {
             match self.inner.upgrade_queue.pop().ok() {
                 Some(tx) => match tx.send(()) {
                     Ok(_) => {
-                        if PRINT_DEBUG {
-                            println!(
-                                "Upgrading to write lock. \
-                                 (thread: {}) ...",
-                                thread::current().name().unwrap_or("<unnamed>")
-                            );
-                        }
+                        print_debug("qutex::QrwLock::process_upgrade_queue: \
+                            Upgrading to write lock...");
                         return true;
                     }
                     Err(()) => {
-                        if PRINT_DEBUG {
-                            println!(
-                                "Unable to upgrade: error completing oneshot \
-                                 (thread: {}) ...",
-                                thread::current().name().unwrap_or("<unnamed>")
-                            );
-                        }
+                        print_debug("qutex::QrwLock::process_upgrade_queue: \
+                            Unable to upgrade: error completing oneshot.");
                         continue;
                     }
                 },
@@ -780,22 +690,12 @@ impl<T> QrwLock<T> {
     // pub unsafe fn process_queues(&self) -> Result<(), ()> {
     #[inline]
     pub unsafe fn process_queues(&self) {
-        if PRINT_DEBUG {
-            println!(
-                "Processing queue (thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::process_queues: Processing queue...");
 
         match self.contend() {
             // Unlocked:
             0 => {
-                if PRINT_DEBUG {
-                    println!(
-                        "Processing queue: Unlocked (thread: {}) ...",
-                        thread::current().name().unwrap_or("<unnamed>")
-                    );
-                }
+                print_debug("qutex::QrwLock::process_queues: Unlocked.");
                 let new_state = if self.process_upgrade_queue() {
                     WRITE_LOCKED
                 } else {
@@ -806,12 +706,7 @@ impl<T> QrwLock<T> {
             }
             // Write locked, unset CONTENDED flag:
             WRITE_LOCKED => {
-                if PRINT_DEBUG {
-                    println!(
-                        "Processing queue: Write Locked (thread: {}) ...",
-                        thread::current().name().unwrap_or("<unnamed>")
-                    );
-                }
+                print_debug("qutex::QrwLock::process_queues: Write locked.");
                 self.inner.state.store(WRITE_LOCKED, SeqCst);
             }
             // Either read locked or already being processed:
@@ -821,11 +716,10 @@ impl<T> QrwLock<T> {
 
                 if PRINT_DEBUG {
                     println!(
-                        "Processing queue: Other {{ state: {}, peek: {:?} }} \
-                         (thread: {}) ...",
+                        "[Thread: {}] Processing queue: Other {{ state: {}, peek: {:?} }}",
+                        thread::current().name().unwrap_or("<unnamed>"),
                         state,
                         self.peek_request_kind(),
-                        thread::current().name().unwrap_or("<unnamed>")
                     );
                 }
 
@@ -866,12 +760,7 @@ impl<T> QrwLock<T> {
     /// `ReadGuard::upgrade` instead.
     #[inline]
     pub unsafe fn upgrade_read_lock(&self) -> Result<(), Receiver<()>> {
-        if PRINT_DEBUG {
-            println!(
-                "Attempting to upgrade reader to writer: (thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::upgrade_read_lock: Attempting to upgrade reader to writer...");
 
         match self.contend() {
             0 => panic!("Unable to upgrade this QrwLock: no read locks."),
@@ -900,12 +789,7 @@ impl<T> QrwLock<T> {
     /// Use `WriteGuard::downgrade` rather than calling this directly.
     #[inline]
     pub unsafe fn downgrade_write_lock(&self) {
-        if PRINT_DEBUG {
-            println!(
-                "Attempting to downgrade write lock...(thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::downgrade_write_lock: Attempting to downgrade write lock...");
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, WRITE_LOCKED);
 
         match self.contend() {
@@ -930,12 +814,7 @@ impl<T> QrwLock<T> {
     // TODO: Wire up upgrade checking (if reader count == 1, complete `upgrade_tx`).
     #[inline]
     pub unsafe fn release_read_lock(&self) {
-        if PRINT_DEBUG {
-            println!(
-                "Releasing read lock...(thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::release_read_lock: Releasing read lock...");
         // Ensure we are read locked and not processing or write locked:
         debug_assert!(self.inner.state.load(SeqCst) & READ_COUNT_MASK != 0);
         debug_assert_eq!(self.inner.state.load(SeqCst) & WRITE_LOCKED, 0);
@@ -959,12 +838,7 @@ impl<T> QrwLock<T> {
     // TODO: Consider using `Ordering::Release`.
     #[inline]
     pub unsafe fn release_write_lock(&self) {
-        if PRINT_DEBUG {
-            println!(
-                "Releasing write lock...(thread: {}) ...",
-                thread::current().name().unwrap_or("<unnamed>")
-            );
-        }
+        print_debug("qutex::QrwLock::release_write_lock: Releasing write lock...");
 
         // If we are not WRITE_LOCKED, we must be CONTENDED (and will soon be
         // write locked).
