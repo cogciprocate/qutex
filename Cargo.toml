@@ -15,11 +15,17 @@ keywords = ["futures", "async", "data-structures", "mutex", "lock"]
 categories = ["asynchronous", "concurrency", "data-structures"]
 edition = "2018"
 
+[features]
+default = []
+async_await = ["futures03"]
+
 [dependencies]
 crossbeam = "0.7"
 futures = "0.1"
 
-# [dependencies.futures-preview]
-# version = "0.2.2"
-# git = "https://github.com/rust-lang-nursery/futures-rs"
-# branch = "master"
+[dependencies.futures03]
+package = "futures-preview"
+version = "0.3.0-alpha.14"
+features = ["compat"]
+optional = true
+

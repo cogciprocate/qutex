@@ -1,3 +1,5 @@
+#![cfg_attr(feature = "async_await", feature(async_await))]
+
 //! A collection of locking data structures, both thread-safe and
 //! single-thread-optimized, which use Rust futures instead of
 //! thread-blocking.
@@ -9,6 +11,9 @@
 extern crate crossbeam;
 extern crate futures;
 
+#[cfg(feature = "async_await")]
+mod async_await;
+
 mod qrw_lock;
 mod qutex;
 
@@ -16,3 +21,6 @@ pub use self::qrw_lock::{
     FutureReadGuard, FutureWriteGuard, QrwLock, QrwRequest, ReadGuard, RequestKind, WriteGuard,
 };
 pub use self::qutex::{FutureGuard, Guard, Qutex, Request};
+
+#[cfg(feature = "async_await")]
+pub use async_await::*;
