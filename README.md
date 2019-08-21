@@ -35,9 +35,8 @@ fn main() {
     for _ in 0..thread_count {
         let future_val = qutex.clone().lock();
 
-        let future_add = future_val.and_then(|mut val| {
+        let future_add = future_val.map(|mut val| {
             *val += 1;
-            Ok(())
         });
 
         threads.push(thread::spawn(|| {
