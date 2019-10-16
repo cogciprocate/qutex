@@ -1,6 +1,6 @@
 [package]
 name = "qutex"
-version = "0.2.3"
+version = "0.2.4"
 authors = ["Nick Sanders <cogciprocate@gmail.com>"]
 license = "MIT"
 description = """\
