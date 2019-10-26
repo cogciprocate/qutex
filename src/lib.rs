@@ -1,5 +1,3 @@
-#![cfg_attr(feature = "async_await", feature(async_await))]
-
 //! A collection of locking data structures, both thread-safe and
 //! single-thread-optimized, which use Rust futures instead of
 //! thread-blocking.
