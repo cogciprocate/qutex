@@ -20,7 +20,7 @@ default = []
 async_await = ["futures03"]
 
 [dependencies]
-crossbeam = "0.7"
+crossbeam = "0.8"
 futures = "0.1"
 
 [dependencies.futures03]

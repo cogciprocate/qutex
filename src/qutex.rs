@@ -224,7 +224,7 @@ impl<T> Qutex<T> {
             // Unlocked:
             0 => {
                 loop {
-                    if let Some(req) = self.inner.queue.pop().ok() {
+                    if let Some(req) = self.inner.queue.pop() {
                         // If there is a send error, a requester has dropped
                         // its receiver so just go to the next.
                         if req.tx.send(()).is_err() {
