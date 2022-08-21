@@ -549,7 +549,8 @@ impl<T> QrwLock<T> {
 
         unsafe {
             if (*self.inner.tip.get()).is_none() {
-                ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop());
+                // We know ::replace return value is `None`.
+                _ = ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop());
             }
             (*self.inner.tip.get()).as_ref().map(|req| req.kind)
         }
