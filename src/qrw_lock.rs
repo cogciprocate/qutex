@@ -937,7 +937,7 @@ mod tests {
 
         // future_r0.join4(future_w0, future_r1, future_r2).wait().unwrap();
 
-        let futures: Vec<Box<Future<Item = (), Error = Canceled>>> = vec![
+        let futures: Vec<Box<dyn Future<Item = (), Error = Canceled>>> = vec![
             future_r0, future_w0, future_r1, future_r2, future_u0, future_r3,
         ];
         future::join_all(futures).wait().unwrap();
