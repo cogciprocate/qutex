@@ -218,11 +218,13 @@ impl<T> Qutex<T> {
     // * This is currently public due to 'derivers' (aka. sub-types). Evaluate.
     // * Consider removing unsafe qualifier.
     // * Return proper error type.
+    // * [performance] Determine whether or not `compare_exchange_weak` should be used instead.
+    // * [performance] Consider failure ordering.
     //
     pub unsafe fn process_queue(&self) {
-        match self.inner.state.compare_and_swap(0, 1, SeqCst) {
+        match self.inner.state.compare_exchange(0, 1, SeqCst, SeqCst) {
             // Unlocked:
-            0 => {
+            Ok(0) => {
                 loop {
                     if let Some(req) = self.inner.queue.pop() {
                         // If there is a send error, a requester has dropped
@@ -239,9 +241,15 @@ impl<T> Qutex<T> {
                 }
             }
             // Already locked, leave it alone:
-            1 => (),
+            Err(1) => (),
+            // Already locked, leave it alone:
+            //
+            // TODO: Remove this option. Should be unreachable.
+            //
+            Ok(1) => unreachable!(),
             // Something else:
-            n => panic!("Qutex::process_queue: inner.state: {}.", n),
+            Ok(n) => panic!("Qutex::process_queue: inner.state: {}.", n),
+            Err(n) => panic!("Qutex::process_queue: error: {}.", n),
         }
     }
 
