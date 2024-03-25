@@ -31,14 +31,17 @@ const READ_COUNT_MASK: usize = 0x00FFFFFF;
 const WRITE_LOCKED: usize = 1 << 24;
 const CONTENDED: usize = 1 << 25;
 
-const PRINT_DEBUG: bool = true;
+const PRINT_DEBUG: bool = false;
 
 /// Prints a debugging message if enabled.
 #[inline(always)]
 fn print_debug(msg: &str) {
     if PRINT_DEBUG {
-        println!("[Thread: {}] {}",
-            ::std::thread::current().name().unwrap_or("<unnamed>"), msg);
+        println!(
+            "[Thread: {}] {}",
+            ::std::thread::current().name().unwrap_or("<unnamed>"),
+            msg
+        );
     }
 }
 
@@ -530,15 +533,13 @@ impl<T> QrwLock<T> {
 
         unsafe {
             // Pop twice if the tip was `None` but the queue was not empty.
-            ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop()).or_else(
-                || {
-                    if (*self.inner.tip.get()).is_some() {
-                        self.pop_request()
-                    } else {
-                        None
-                    }
-                },
-            )
+            ::std::mem::replace(&mut *self.inner.tip.get(), self.inner.queue.pop()).or_else(|| {
+                if (*self.inner.tip.get()).is_some() {
+                    self.pop_request()
+                } else {
+                    None
+                }
+            })
         }
     }
 
@@ -587,8 +588,10 @@ impl<T> QrwLock<T> {
 
                 if let Some(RequestKind::Read) = self.peek_request_kind() {
                     debug_assert!(state != WRITE_LOCKED);
-                    print_debug("qutex::QrwLock::fulfill_request: \
-                        Next request kind is a read, popping next request...");
+                    print_debug(
+                        "qutex::QrwLock::fulfill_request: \
+                        Next request kind is a read, popping next request...",
+                    );
                     continue;
                 } else {
                     break;
@@ -649,13 +652,17 @@ impl<T> QrwLock<T> {
             match self.inner.upgrade_queue.pop() {
                 Some(tx) => match tx.send(()) {
                     Ok(_) => {
-                        print_debug("qutex::QrwLock::process_upgrade_queue: \
-                            Upgrading to write lock...");
+                        print_debug(
+                            "qutex::QrwLock::process_upgrade_queue: \
+                            Upgrading to write lock...",
+                        );
                         return true;
                     }
                     Err(()) => {
-                        print_debug("qutex::QrwLock::process_upgrade_queue: \
-                            Unable to upgrade: error completing oneshot.");
+                        print_debug(
+                            "qutex::QrwLock::process_upgrade_queue: \
+                            Unable to upgrade: error completing oneshot.",
+                        );
                         continue;
                     }
                 },
