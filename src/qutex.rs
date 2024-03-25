@@ -284,6 +284,12 @@ impl<T> Clone for Qutex<T> {
     }
 }
 
+impl<T: Default> Default for Qutex<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 #[cfg(test)]
 // Woefully incomplete:
 mod tests {

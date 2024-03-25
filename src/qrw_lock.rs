@@ -887,6 +887,12 @@ impl<T> Clone for QrwLock<T> {
     }
 }
 
+impl<T: Default> Default for QrwLock<T> {
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
 #[cfg(test)]
 // Woefully incomplete.
 mod tests {
